@@ -1,1 +1,8 @@
-﻿
+﻿[
+  {
+    "Name": "Team Captain",
+    "MaxQuantity": 5,
+    "MinSellPrice": 1.33,
+    "MinBuyPrice": 0.66
+  }
+]
