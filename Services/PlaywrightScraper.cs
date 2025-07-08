@@ -8,17 +8,64 @@ namespace ArkRoxBot.Services
     {
         private IBrowserContext? _context;
 
+        private async Task ImportCookiesFromFileAsync(IBrowserContext context, string filePath)
+        {
+            var json = await File.ReadAllTextAsync(filePath);
+
+            // parse as a dynamic array so bad fields do not break deserialization
+            var rawCookies = System.Text.Json.JsonDocument.Parse(json).RootElement;
+
+            var cookies = new List<Cookie>();
+
+            foreach (var cookieJson in rawCookies.EnumerateArray())
+            {
+                cookies.Add(new Cookie
+                {
+                    Name = cookieJson.GetProperty("name").GetString(),
+                    Value = cookieJson.GetProperty("value").GetString(),
+                    Domain = cookieJson.GetProperty("domain").GetString(),
+                    Path = cookieJson.TryGetProperty("path", out var p) ? p.GetString() : "/"
+                    // we leave SameSite, Secure, etc. default
+                });
+            }
+
+            await context.AddCookiesAsync(cookies);
+
+            Console.WriteLine($"Imported {cookies.Count} cookies from {filePath}");
+        }
+
+
         public async Task InitAsync()
         {
             var playwright = await Playwright.CreateAsync();
 
-            _context = await playwright.Chromium.LaunchPersistentContextAsync("arkrox-userdata", new BrowserTypeLaunchPersistentContextOptions
-            {
-                Headless = false,
-                SlowMo = 50
-            });
+            _context = await playwright.Chromium.LaunchPersistentContextAsync(
+                @"E:\ArkRox\arkrox-userdata",
+                new BrowserTypeLaunchPersistentContextOptions
+                {
+                    Headless = false,
+                    SlowMo = 50
+                });
+
+            await ImportCookiesFromFileAsync(_context, @"E:\ArkRox\arkrox-userdata\bp_cookies.json");
+            await ImportCookiesFromFileAsync(_context, @"E:\ArkRox\arkrox-userdata\steam_cookies.json");
+
+            await _context.AddCookiesAsync(new[]
+{
+                 new Cookie
+                  {
+                  Name = "cf_clearance",
+                  Value = "J9Mtt4bpH_YXd3ejlRaF2.h5z87JaMQMxe.PCBNjSIo-1749210587-1.2.1.1-2J33Y9swVxDvxsMaXFkKGYqBCNBtbHN96hqA2IxDPKG1sBzJD6tZY2iBvPWTSaxB_TJ9yGP7MYbDvTrK48asQr_nwPmXl5CphPiKn3EUaWr0e8S_uOG2_cmlAV5IAvVyZN5ayh6DwwcdQkrA0EzOB7KoDIcyXsx8srCXMAOgkd6sPa4n587tOL05sO0HbuEG._bt9_TfsUVdU7wlnXPpR04AXcV86kkisurSEdE.9QJjmkiwfM_38IBM.I5Vf.gs3nLGCh1hrfyqhD7vzPcoQ6uGkfboVOUlu9q80AhsMFCMYiMZFdQSRE.bwuapAydiy17ThGfJJVBAS.uSH05x2xdN8Vvckwd29gHz.XqdNNE.IR61x4xPtWz_g1u1Te9X",
+                  Domain = "backpack.tf",
+                  Path = "/"
+                  }
+                    });
 
         }
+
+
+
+
 
         public async Task<string> FetchClassifiedsPageAsync(string itemName, int page = 1)
         {
