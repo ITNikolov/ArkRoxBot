@@ -1,14 +1,9 @@
-﻿using ArkRoxBot.Models;
-using Newtonsoft.Json;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+﻿using System.Text.Json;
+using ArkRoxBot.Models;
 
 namespace ArkRoxBot.Services
 {
-    internal class ItemConfigLoader
+    public class ItemConfigLoader
     {
         private readonly string _filePath;
 
@@ -17,20 +12,23 @@ namespace ArkRoxBot.Services
             _filePath = filePath;
         }
 
-
-        public List<ItemConfig> LoadItems()
+        public ConfigRoot LoadItems()
         {
             if (!File.Exists(_filePath))
             {
-                Console.WriteLine($"Error: Could not find the items file at {_filePath}");
-                return new List<ItemConfig>();
+                Console.WriteLine($"❌ Error: Could not find config file at {_filePath}");
+                return new ConfigRoot();
             }
 
             string json = File.ReadAllText(_filePath);
 
-            List<ItemConfig>? items = JsonConvert.DeserializeObject<List<ItemConfig>>(json);
+            JsonSerializerOptions options = new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            };
 
-            return items ?? new List<ItemConfig>();
+            ConfigRoot? config = JsonSerializer.Deserialize<ConfigRoot>(json, options);
+            return config ?? new ConfigRoot();
         }
     }
 }

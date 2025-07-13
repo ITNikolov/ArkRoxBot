@@ -1,20 +1,16 @@
 ﻿using Microsoft.Playwright;
 
-
-
 namespace ArkRoxBot.Services
 {
     public class PlaywrightScraper
     {
         private IBrowserContext? _context;
+        private IPage? _sharedPage;
 
         private async Task ImportCookiesFromFileAsync(IBrowserContext context, string filePath)
         {
             var json = await File.ReadAllTextAsync(filePath);
-
-            // parse as a dynamic array so bad fields do not break deserialization
             var rawCookies = System.Text.Json.JsonDocument.Parse(json).RootElement;
-
             var cookies = new List<Cookie>();
 
             foreach (var cookieJson in rawCookies.EnumerateArray())
@@ -25,100 +21,103 @@ namespace ArkRoxBot.Services
                     Value = cookieJson.GetProperty("value").GetString(),
                     Domain = cookieJson.GetProperty("domain").GetString(),
                     Path = cookieJson.TryGetProperty("path", out var p) ? p.GetString() : "/"
-                    // we leave SameSite, Secure, etc. default
                 });
             }
 
             await context.AddCookiesAsync(cookies);
-
             Console.WriteLine($"Imported {cookies.Count} cookies from {filePath}");
         }
-
 
         public async Task InitAsync()
         {
             var playwright = await Playwright.CreateAsync();
 
             _context = await playwright.Chromium.LaunchPersistentContextAsync(
-                @"E:\ArkRox\arkrox-userdata",
+                @"E:\\ArkRox\\arkrox-userdata",
                 new BrowserTypeLaunchPersistentContextOptions
                 {
                     Headless = false,
                     SlowMo = 50
                 });
 
-            await ImportCookiesFromFileAsync(_context, @"E:\ArkRox\arkrox-userdata\bp_cookies.json");
-            await ImportCookiesFromFileAsync(_context, @"E:\ArkRox\arkrox-userdata\steam_cookies.json");
+            await ImportCookiesFromFileAsync(_context, @"E:\\ArkRox\\arkrox-userdata\\bp_cookies.json");
+            await ImportCookiesFromFileAsync(_context, @"E:\\ArkRox\\arkrox-userdata\\steam_cookies.json");
 
             await _context.AddCookiesAsync(new[]
-{
-                 new Cookie
-                  {
-                  Name = "cf_clearance",
-                  Value = "J9Mtt4bpH_YXd3ejlRaF2.h5z87JaMQMxe.PCBNjSIo-1749210587-1.2.1.1-2J33Y9swVxDvxsMaXFkKGYqBCNBtbHN96hqA2IxDPKG1sBzJD6tZY2iBvPWTSaxB_TJ9yGP7MYbDvTrK48asQr_nwPmXl5CphPiKn3EUaWr0e8S_uOG2_cmlAV5IAvVyZN5ayh6DwwcdQkrA0EzOB7KoDIcyXsx8srCXMAOgkd6sPa4n587tOL05sO0HbuEG._bt9_TfsUVdU7wlnXPpR04AXcV86kkisurSEdE.9QJjmkiwfM_38IBM.I5Vf.gs3nLGCh1hrfyqhD7vzPcoQ6uGkfboVOUlu9q80AhsMFCMYiMZFdQSRE.bwuapAydiy17ThGfJJVBAS.uSH05x2xdN8Vvckwd29gHz.XqdNNE.IR61x4xPtWz_g1u1Te9X",
-                  Domain = "backpack.tf",
-                  Path = "/"
-                  }
-                    });
+            {
+                new Cookie
+                {
+                    Name = "cf_clearance",
+                    Value = "J9Mtt4bpH_YXd3ejlRaF2...", // truncated for readability
+                    Domain = "backpack.tf",
+                    Path = "/"
+                }
+            });
 
+            _sharedPage = await _context.NewPageAsync();
         }
-
-
-
-
 
         public async Task<string> FetchClassifiedsPageAsync(string itemName, int page = 1)
         {
-            if (_context == null)
+            if (_sharedPage == null)
             {
-                Console.WriteLine("Error: Browser not initialized.");
+                Console.WriteLine("Error: Shared browser page is not initialized.");
                 return string.Empty;
             }
-
-            var context = _context;
-            var pageObj = await context.NewPageAsync();
-
-            await pageObj.Context.AddCookiesAsync(new[]
-{
-    new Cookie
-    {
-        Name = "sessionid",
-        Value = "b6e91a0a87a36c800349fa1b",
-        Domain = "backpack.tf",
-        Path = "/"
-    },
-    new Cookie
-    {
-        Name = "steamLoginSecure",
-        Value = "76561199466477276%7C%7CeyAidHlwIjogIkpXVCIsICJhbGciOiAiRWREU0EiIH0.eyAiaXNzIjogInI6MDAwRl8yNjkxRUMyQl8zQjYxMCIsICJzdWIiOiAiNzY1NjExOTk0NjY0NzcyNzYiLCAiYXVkIjogWyAid2ViOmNvbW11bml0eSIgXSwgImV4cCI6IDE3NTE3OTgwMTgsICJuYmYiOiAxNzQzMDcwMTA2LCAiaWF0IjogMTc1MTcxMDEwNiwgImp0aSI6ICIwMDE4XzI2OTFFQzREXzMyOTgyIiwgIm9hdCI6IDE3NTE3MTAxMDYsICJydF9leHAiOiAxNzcwMDE2NDgwLCAicGVyIjogMCwgImlwX3N1YmplY3QiOiAiNzguMTI4LjY1LjE2MiIsICJpcF9jb25maXJtZXIiOiAiNzguMTI4LjY1LjE2MiIgfQ.bx8j3lrQ-3pQVJdf5MRrpByhDl8bXiFrZkl10u8NZVUtoM0DSRf_pdsXjstxlfpey5X1V5kdWDOGeY4KWjunDQ",
-        Domain = "backpack.tf",
-        Path = "/"
-    },
-    new Cookie
-    {
-        Name = "cf_clearance",
-        Value = "J9Mtt4bpH_YXd3ejlRaF2.h5z87JaMQMxe.PCBNjSIo-1749210587-1.2.1.1-2J33Y9swVxDvxsMaXFkKGYqBCNBtbHN96hqA2IxDPKG1sBzJD6tZY2iBvPWTSaxB_TJ9yGP7MYbDvTrK48asQr_nwPmXl5CphPiKn3EUaWr0e8S_uOG2_cmlAV5IAvVyZN5ayh6DwwcdQkrA0EzOB7KoDIcyXsx8srCXMAOgkd6sPa4n587tOL05sO0HbuEG._bt9_TfsUVdU7wlnXPpR04AXcV86kkisurSEdE.9QJjmkiwfM_38IBM.I5Vf.gs3nLGCh1hrfyqhD7vzPcoQ6uGkfboVOUlu9q80AhsMFCMYiMZFdQSRE.bwuapAydiy17ThGfJJVBAS.uSH05x2xdN8Vvckwd29gHz.XqdNNE.IR61x4xPtWz_g1u1Te9X",
-        Domain = "backpack.tf",
-        Path = "/"
-    }
-});
-
-
 
             string urlName = Uri.EscapeDataString(itemName);
             string url = $"https://backpack.tf/classifieds?page={page}&item={urlName}&quality=6&tradable=1&craftable=1&australium=-1&killstreak_tier=0";
 
-            await pageObj.GotoAsync(url, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+            await _sharedPage.GotoAsync(url, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+            await Task.Delay(3000);
 
-            // wait for parent <ul class="media-list"> to be visible
-            await Task.Delay(10000); // wait 10 seconds manually
+            await _sharedPage.WaitForSelectorAsync("li.listing", new PageWaitForSelectorOptions
+            {
+                Timeout = 15000,
+                State = WaitForSelectorState.Visible
+            });
 
-            var listings = await pageObj.QuerySelectorAllAsync("li.listing");
-            Console.WriteLine($"Found {listings.Count} listings on the page.");
+            await ExtractListingsFromPageAsync(_sharedPage);
 
-            string content = await pageObj.ContentAsync();
-
-            return content;
+            return await _sharedPage.ContentAsync();
         }
+
+        public async Task FetchAllPagesAsync(string itemName)
+        {
+            for (int page = 1; page <= 2; page++)
+            {
+                string content = await FetchClassifiedsPageAsync(itemName, page);
+                Console.WriteLine($"✅ Page {page} scraped for '{itemName}' | Length: {content.Length}");
+                await Task.Delay(1000);
+            }
+        }
+
+        private async Task ExtractListingsFromPageAsync(IPage page)
+        {
+            // Wait for page to load listings
+            await page.WaitForSelectorAsync("div.listing", new() { Timeout = 8000 });
+
+            var listings = await page.QuerySelectorAllAsync("div.listing");
+            Console.WriteLine($">> Listings Found: {listings.Count}");
+
+            foreach (var listing in listings)
+            {
+                string? price = await listing.GetAttributeAsync("data-listing_price");
+
+                if (price == null)
+                {
+                    var children = await listing.QuerySelectorAllAsync("*");
+                    foreach (var child in children)
+                    {
+                        price = await child.GetAttributeAsync("data-listing_price");
+                        if (price != null) break;
+                    }
+                }
+
+                Console.WriteLine($">> Price: {price ?? "N/A"} ref");
+            }
+        }
+
+
     }
 }
