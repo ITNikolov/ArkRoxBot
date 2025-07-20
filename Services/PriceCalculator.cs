@@ -11,9 +11,44 @@ namespace ArkRoxBot.Services
 
             foreach (ListingData listing in listings)
             {
+                // Skip if price is null or empty
+                if (string.IsNullOrWhiteSpace(listing.Price))
+                {
+                    continue;
+                }
+
+                string cleanedPrice = listing.Price.Trim().ToLower();
+
+                // Skip key-only listings (e.g., "45 keys")
+                if (cleanedPrice.Contains("key") && !cleanedPrice.Contains("ref"))
+                {
+                    Console.WriteLine($"❌ Skipped key-only price: '{listing.Price}'");
+                    continue;
+                }
+
+                // Try to extract just the "ref" portion from mixed price (e.g., "2 keys, 12 ref")
+                string refPart = cleanedPrice;
+
+                if (cleanedPrice.Contains(","))
+                {
+                    string[] parts = cleanedPrice.Split(',');
+
+                    foreach (string part in parts)
+                    {
+                        if (part.Contains("ref"))
+                        {
+                            refPart = part;
+                            break;
+                        }
+                    }
+                }
+
+                // Remove "ref" and whitespace
+                refPart = refPart.Replace("ref", "").Trim();
+
                 decimal parsedPrice;
                 bool isParsed = decimal.TryParse(
-                    listing.Price,
+                    refPart,
                     System.Globalization.NumberStyles.Any,
                     System.Globalization.CultureInfo.InvariantCulture,
                     out parsedPrice
@@ -21,7 +56,7 @@ namespace ArkRoxBot.Services
 
                 if (!isParsed)
                 {
-                    Console.WriteLine($"❌ Could not parse price: '{listing.Price}'");
+                    Console.WriteLine($"❌ Could not parse cleaned price: '{refPart}' (from '{listing.Price}')");
                     continue;
                 }
 
@@ -57,6 +92,7 @@ namespace ArkRoxBot.Services
                 MostCommonSellPrice = mostCommonSellPrice
             };
         }
+
 
 
         private decimal GetMostFrequentPrice(List<decimal> prices)
