@@ -1,4 +1,5 @@
-﻿using Microsoft.Playwright;
+﻿using ArkRoxBot.Models;
+using Microsoft.Playwright;
 
 namespace ArkRoxBot.Services
 {
@@ -6,6 +7,9 @@ namespace ArkRoxBot.Services
     {
         private IBrowserContext? _context;
         private IPage? _sharedPage;
+        private readonly PriceCalculator _priceCalculator = new PriceCalculator();
+        private readonly KeyPriceTracker _keyPriceTracker = new KeyPriceTracker();
+
 
         private async Task ImportCookiesFromFileAsync(IBrowserContext context, string filePath)
         {
@@ -82,41 +86,88 @@ namespace ArkRoxBot.Services
             return await _sharedPage.ContentAsync();
         }
 
+        public async Task UpdateKeyPriceAsync()
+        {
+            await FetchAllPagesAsync("Mann Co. Supply Crate Key");
+        }
+
         public async Task FetchAllPagesAsync(string itemName)
         {
+            List<ListingData> allListings = new List<ListingData>();
+
             for (int page = 1; page <= 2; page++)
             {
                 string content = await FetchClassifiedsPageAsync(itemName, page);
                 Console.WriteLine($"✅ Page {page} scraped for '{itemName}' | Length: {content.Length}");
+
+                List<ListingData> pageListings = await ExtractListingsFromPageAsync(_sharedPage);
+                allListings.AddRange(pageListings);
+
                 await Task.Delay(1000);
             }
+
+            if (allListings.Count == 0)
+            {
+                Console.WriteLine($"⚠️ No listings found for {itemName}. Skipping price calculation.");
+                return;
+            }
+
+            PriceResult result = _priceCalculator.Calculate(itemName, allListings);
+
+            if (itemName == "Mann Co. Supply Crate Key")
+            {
+                _keyPriceTracker.MostCommonBuyPrice = result.MostCommonBuyPrice;
+                _keyPriceTracker.MostCommonSellPrice = result.MostCommonSellPrice;
+                _keyPriceTracker.LastUpdated = DateTime.Now;
+
+                Console.WriteLine($"🟡 Key Price Updated → Buy: {result.MostCommonBuyPrice} | Sell: {result.MostCommonSellPrice} (as of {_keyPriceTracker.LastUpdated})");
+            }
+            else
+            {
+                Console.WriteLine($"📦 Item: {itemName} → Buy: {result.MostCommonBuyPrice} | Sell: {result.MostCommonSellPrice}");
+            }
+
         }
 
-        private async Task ExtractListingsFromPageAsync(IPage page)
-        {
-            // Wait for page to load listings
-            await page.WaitForSelectorAsync("div.listing", new() { Timeout = 8000 });
 
-            var listings = await page.QuerySelectorAllAsync("div.listing");
+        private async Task<List<ListingData>> ExtractListingsFromPageAsync(IPage page)
+        {
+            List<ListingData> results = new List<ListingData>();
+
+            await page.WaitForSelectorAsync("[data-listing_price]", new PageWaitForSelectorOptions
+            {
+                Timeout = 15000
+            });
+
+            IReadOnlyList<IElementHandle> listings = await page.QuerySelectorAllAsync("[data-listing_price]");
             Console.WriteLine($">> Listings Found: {listings.Count}");
 
-            foreach (var listing in listings)
+            foreach (IElementHandle listing in listings)
             {
                 string? price = await listing.GetAttributeAsync("data-listing_price");
+                string? intent = await listing.GetAttributeAsync("data-listing_intent");
 
-                if (price == null)
+                if (string.IsNullOrEmpty(price) || string.IsNullOrEmpty(intent))
                 {
-                    var children = await listing.QuerySelectorAllAsync("*");
-                    foreach (var child in children)
-                    {
-                        price = await child.GetAttributeAsync("data-listing_price");
-                        if (price != null) break;
-                    }
+                    continue;
                 }
 
-                Console.WriteLine($">> Price: {price ?? "N/A"} ref");
+                bool isBuy = intent.ToLower() == "buy";
+
+                ListingData listingData = new ListingData
+                {
+                    Price = price,
+                    IsBuyOrder = isBuy
+                };
+
+                results.Add(listingData);
+
+                Console.WriteLine($">> {(isBuy ? "BUY" : "SELL")} | {price} ref");
             }
+
+            return results;
         }
+
 
 
     }
