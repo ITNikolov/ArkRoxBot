@@ -1,4 +1,5 @@
-﻿using ArkRoxBot.Models;
+﻿using ArkRoxBot.Interfaces;
+using ArkRoxBot.Models;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -8,14 +9,15 @@ using System.Threading.Tasks;
 
 namespace ArkRoxBot.Services
 {
-    public class PriceParser
+    public class PriceParser : IPriceParser
     {
-        private readonly KeyPriceTracker _keyPriceTracker;
+        private readonly IKeyPriceTracker _keyPriceTracker;
 
-        public PriceParser(KeyPriceTracker keyPriceTracker)
+        public PriceParser(IKeyPriceTracker keyPriceTracker)
         {
             _keyPriceTracker = keyPriceTracker;
         }
+
 
         public bool TryParseToRefined(string input, out decimal totalRefined)
         {

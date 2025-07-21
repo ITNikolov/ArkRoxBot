@@ -1,4 +1,5 @@
-﻿using ArkRoxBot.Models;
+﻿using ArkRoxBot.Interfaces;
+using ArkRoxBot.Models;
 using Microsoft.Playwright;
 
 namespace ArkRoxBot.Services
@@ -7,8 +8,15 @@ namespace ArkRoxBot.Services
     {
         private IBrowserContext? _context;
         private IPage? _sharedPage;
-        private readonly PriceCalculator _priceCalculator = new PriceCalculator();
-        private readonly KeyPriceTracker _keyPriceTracker = new KeyPriceTracker();
+        private readonly PriceCalculator _priceCalculator;
+        private readonly IKeyPriceTracker _keyPriceTracker;
+
+        public PlaywrightScraper(PriceCalculator priceCalculator, IKeyPriceTracker keyPriceTracker)
+        {
+            _priceCalculator = priceCalculator;
+            _keyPriceTracker = keyPriceTracker;
+        }
+
 
 
         private async Task ImportCookiesFromFileAsync(IBrowserContext context, string filePath)

@@ -1,4 +1,5 @@
-﻿using System;
+﻿using ArkRoxBot.Interfaces;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -6,7 +7,7 @@ using System.Threading.Tasks;
 
 namespace ArkRoxBot.Models
 {
-    public class KeyPriceTracker
+    public class KeyPriceTracker : IKeyPriceTracker
     {
         
         public decimal MostCommonBuyPrice { get; set; }
@@ -16,6 +17,10 @@ namespace ArkRoxBot.Models
 
         public PriceResult? LatestKeyPrice { get; set; }
 
+        public Task UpdateKeyPriceAsync()
+        {
+            throw new NotImplementedException();
+        }
         public decimal GetCurrentSellPrice()
         {
             return LatestKeyPrice?.MostCommonSellPrice ?? 0;
@@ -26,6 +31,7 @@ namespace ArkRoxBot.Models
             return LatestKeyPrice?.MostCommonBuyPrice ?? 0;
         }
 
+        
     }
 
 }
