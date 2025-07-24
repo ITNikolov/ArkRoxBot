@@ -1,8 +1,5 @@
 ﻿using ArkRoxBot.Interfaces;
 using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
 using System.Threading.Tasks;
 
 namespace ArkRoxBot.Services
@@ -23,11 +20,21 @@ namespace ArkRoxBot.Services
         public async Task RunAsync()
         {
             await _scraper.InitAsync();
-            await _keyTracker.UpdateKeyPriceAsync();
-            await _scraper.FetchAllPagesAsync("Team Captain");
 
-            // logic to scrape item prices or test
+            string keyName = "Mann Co. Supply Crate Key";
+            var listings = await _scraper.FetchAllPagesAsync(keyName);
+
+            if (listings.Count == 0)
+            {
+                Console.WriteLine("⚠️ No listings found for key.");
+                return;
+            }
+
+            var result = _calculator.Calculate(keyName, listings);
+            _keyTracker.UpdatePrices(result); // <-- NEW
+
+            // Test scrape for another item
+            await _scraper.FetchAllPagesAsync("Team Captain");
         }
     }
-
 }

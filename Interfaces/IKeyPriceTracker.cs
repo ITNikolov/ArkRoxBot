@@ -15,7 +15,7 @@ namespace ArkRoxBot.Interfaces
 
         PriceResult? LatestKeyPrice { get; set; }
 
-        Task UpdateKeyPriceAsync();
+        void UpdatePrices(PriceResult result);
         decimal GetCurrentSellPrice();
         decimal GetCurrentBuyPrice();
     }

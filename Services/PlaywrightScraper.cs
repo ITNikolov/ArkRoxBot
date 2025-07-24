@@ -99,25 +99,28 @@ namespace ArkRoxBot.Services
             await FetchAllPagesAsync("Mann Co. Supply Crate Key");
         }
 
-        public async Task FetchAllPagesAsync(string itemName)
+        public async Task<List<ListingData>> FetchAllPagesAsync(string itemName)
         {
             List<ListingData> allListings = new List<ListingData>();
 
-            for (int page = 1; page <= 2; page++)
+            int maxPages = itemName == "Mann Co. Supply Crate Key" ? 1 : 2;
+
+            for (int page = 1; page <= maxPages; page++)
             {
                 string content = await FetchClassifiedsPageAsync(itemName, page);
-                Console.WriteLine($"✅ Page {page} scraped for '{itemName}' | Length: {content.Length}");
+                Console.WriteLine($"Page {page} scraped for '{itemName}' | Length: {content.Length}");
 
                 List<ListingData> pageListings = await ExtractListingsFromPageAsync(_sharedPage);
                 allListings.AddRange(pageListings);
 
+                Console.WriteLine($" Listings added: {pageListings.Count} | 🔍 Skipped: {pageListings.Count(l => l.Price == null)}");
                 await Task.Delay(1000);
             }
 
             if (allListings.Count == 0)
             {
-                Console.WriteLine($"⚠️ No listings found for {itemName}. Skipping price calculation.");
-                return;
+                Console.WriteLine($" No listings found for {itemName}. Skipping price calculation.");
+                return allListings;
             }
 
             PriceResult result = _priceCalculator.Calculate(itemName, allListings);
@@ -128,14 +131,18 @@ namespace ArkRoxBot.Services
                 _keyPriceTracker.MostCommonSellPrice = result.MostCommonSellPrice;
                 _keyPriceTracker.LastUpdated = DateTime.Now;
 
-                Console.WriteLine($"🟡 Key Price Updated → Buy: {result.MostCommonBuyPrice} | Sell: {result.MostCommonSellPrice} (as of {_keyPriceTracker.LastUpdated})");
+                Console.WriteLine($"Key Price Updated → Buy: {result.MostCommonBuyPrice} | Sell: {result.MostCommonSellPrice}");
             }
             else
             {
-                Console.WriteLine($"📦 Item: {itemName} → Buy: {result.MostCommonBuyPrice} | Sell: {result.MostCommonSellPrice}");
+                Console.WriteLine($"Item Price Calculated → {itemName}: Buy = {result.MostCommonBuyPrice} | Sell = {result.MostCommonSellPrice}");
             }
 
+            return allListings;
         }
+
+
+
 
 
         private async Task<List<ListingData>> ExtractListingsFromPageAsync(IPage page)
@@ -148,7 +155,8 @@ namespace ArkRoxBot.Services
             });
 
             IReadOnlyList<IElementHandle> listings = await page.QuerySelectorAllAsync("[data-listing_price]");
-            Console.WriteLine($">> Listings Found: {listings.Count}");
+            Console.WriteLine($"Listings Found: {listings.Count}");
+            int skipped = 0;
 
             foreach (IElementHandle listing in listings)
             {
@@ -157,6 +165,7 @@ namespace ArkRoxBot.Services
 
                 if (string.IsNullOrEmpty(price) || string.IsNullOrEmpty(intent))
                 {
+                    skipped++;
                     continue;
                 }
 
@@ -170,11 +179,14 @@ namespace ArkRoxBot.Services
 
                 results.Add(listingData);
 
-                Console.WriteLine($">> {(isBuy ? "BUY" : "SELL")} | {price} ref");
+                Console.WriteLine($"{(isBuy ? "BUY" : "SELL")} | {price} ref");
             }
 
+            Console.WriteLine($" Listings added: {results.Count} | ❌ Skipped: {skipped}");
             return results;
+
         }
+
 
 
 

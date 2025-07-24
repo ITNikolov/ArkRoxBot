@@ -18,6 +18,10 @@ namespace ArkRoxBot.Services
             _keyPriceTracker = keyPriceTracker;
         }
 
+        public static decimal RoundDownToScrap(decimal price)
+        {
+            return Math.Floor(price / 0.11m) * 0.11m;
+        }
 
         public bool TryParseToRefined(string input, out decimal totalRefined)
         {
