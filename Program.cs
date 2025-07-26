@@ -11,6 +11,7 @@ var host = Host.CreateDefaultBuilder(args)
         services.AddSingleton<IPriceParser, PriceParser>();
         services.AddSingleton<PriceCalculator>();
         services.AddSingleton<PlaywrightScraper>();
+        services.AddSingleton<PriceStore>();
         services.AddSingleton<BotService>(); // Main bot runner
     })
     .Build();

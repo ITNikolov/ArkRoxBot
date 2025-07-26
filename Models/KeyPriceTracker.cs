@@ -13,13 +13,13 @@ namespace ArkRoxBot.Models
 
         public void UpdatePrices(PriceResult result)
         {
-            LatestKeyPrice = result;
             MostCommonBuyPrice = result.MostCommonBuyPrice;
             MostCommonSellPrice = result.MostCommonSellPrice;
             LastUpdated = DateTime.Now;
 
-            Console.WriteLine($"✅ Key Price Updated: Buy = {MostCommonBuyPrice}, Sell = {MostCommonSellPrice}");
+            Console.WriteLine($"🔑 Key Price Updated → Buy = {MostCommonBuyPrice} | Sell = {MostCommonSellPrice} (as of {LastUpdated})");
         }
+
 
         public decimal GetCurrentSellPrice()
         {

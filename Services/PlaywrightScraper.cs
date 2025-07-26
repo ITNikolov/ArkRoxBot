@@ -89,15 +89,16 @@ namespace ArkRoxBot.Services
                 State = WaitForSelectorState.Visible
             });
 
-            await ExtractListingsFromPageAsync(_sharedPage);
+            // Removed: await ExtractListingsFromPageAsync(_sharedPage); ❌
 
             return await _sharedPage.ContentAsync();
         }
 
-        public async Task UpdateKeyPriceAsync()
-        {
-            await FetchAllPagesAsync("Mann Co. Supply Crate Key");
-        }
+
+        //public async Task UpdateKeyPriceAsync()
+        //{
+        //    await FetchAllPagesAsync("Mann Co. Supply Crate Key");
+        // }
 
         public async Task<List<ListingData>> FetchAllPagesAsync(string itemName)
         {
