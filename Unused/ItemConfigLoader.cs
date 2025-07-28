@@ -1,7 +1,7 @@
 ﻿using System.Text.Json;
-using ArkRoxBot.Models;
+using ArkRoxBot.Models.Config;
 
-namespace ArkRoxBot.Services
+namespace ArkRoxBot.Unused
 {
     public class ItemConfigLoader
     {

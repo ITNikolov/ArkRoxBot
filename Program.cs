@@ -7,6 +7,7 @@ using Microsoft.Extensions.Hosting;
 var host = Host.CreateDefaultBuilder(args)
     .ConfigureServices((context, services) =>
     {
+        services.AddSingleton<CommandService>();
         services.AddSingleton<IKeyPriceTracker, KeyPriceTracker>();
         services.AddSingleton<IPriceParser, PriceParser>();
         services.AddSingleton<PriceCalculator>();

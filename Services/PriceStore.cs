@@ -23,6 +23,11 @@ namespace ArkRoxBot.Services
             return result;
         }
 
+        public bool TryGetPrice(string itemName, out PriceResult result)
+        {
+            return _prices.TryGetValue(itemName.ToLower(), out result);
+        }
+
         public IReadOnlyDictionary<string, PriceResult> GetAllPrices()
         {
             return _prices;

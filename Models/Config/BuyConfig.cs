@@ -4,7 +4,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace ArkRoxBot.Models
+namespace ArkRoxBot.Models.Config
 {
     public class BuyConfig
     {

@@ -10,13 +10,16 @@ namespace ArkRoxBot.Services
         private readonly PriceCalculator _calculator;
         private readonly IKeyPriceTracker _keyTracker;
         private readonly PriceStore _priceStore;
+        private readonly CommandService _commandService;
 
-        public BotService(PlaywrightScraper scraper, PriceCalculator calculator, IKeyPriceTracker keyTracker, PriceStore priceStore)
+
+        public BotService(PlaywrightScraper scraper, PriceCalculator calculator, IKeyPriceTracker keyTracker, PriceStore priceStore, CommandService commandService)
         {
             _scraper = scraper;
             _calculator = calculator;
             _keyTracker = keyTracker;
             _priceStore = priceStore;
+            _commandService = commandService;
         }
 
         public async Task RunAsync()
@@ -41,6 +44,11 @@ namespace ArkRoxBot.Services
                 _priceStore.SetPrice(hatName, hatResult);
 
                 Console.WriteLine($"✅ Item Price Calculated → {hatName}: Buy = {hatResult.MostCommonBuyPrice} | Sell = {hatResult.MostCommonSellPrice}");
+
+                string fakeMessage = "!price Team Captain";
+                string response = _commandService.HandleCommand(fakeMessage);
+                Console.WriteLine($"💬 BOT: {response}");
+
             }
         }
 
