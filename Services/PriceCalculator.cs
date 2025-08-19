@@ -1,26 +1,24 @@
-﻿using ArkRoxBot.Interfaces;
+﻿using ArkRoxBot.Helpers;
+using ArkRoxBot.Interfaces;
 using ArkRoxBot.Models;
 
 namespace ArkRoxBot.Services
 {
-
     public class PriceCalculator
     {
-
         private readonly IPriceParser _priceParser;
+
         public PriceCalculator(IPriceParser priceParser)
         {
             _priceParser = priceParser;
         }
 
-
-
         public PriceResult Calculate(string itemName, List<ListingData> listings)
         {
-            List<decimal> buyPrices = new List<decimal>();
-            List<decimal> sellPrices = new List<decimal>();
+            List<decimal> buyPrices = new();
+            List<decimal> sellPrices = new();
 
-            foreach (ListingData listing in listings)
+            foreach (var listing in listings)
             {
                 if (!_priceParser.TryParseToRefined(listing.Price, out decimal refinedPrice))
                 {
@@ -29,72 +27,81 @@ namespace ArkRoxBot.Services
                 }
 
                 if (listing.IsBuyOrder)
-                {
                     buyPrices.Add(refinedPrice);
-                }
                 else
-                {
                     sellPrices.Add(refinedPrice);
-                }
             }
-
-            decimal mostCommonBuyPrice = GetMostFrequentPrice(buyPrices);
-            decimal mostCommonSellPrice = GetMostFrequentPrice(sellPrices);
 
             Console.WriteLine($"✅ Parsed BUY: {buyPrices.Count} | SELL: {sellPrices.Count}");
 
-            foreach (decimal price in buyPrices)
-            {
+            foreach (var price in buyPrices)
                 Console.WriteLine($"  🟢 BUY Collected: {price} ref");
-            }
 
-            foreach (decimal price in sellPrices)
-            {
+            foreach (var price in sellPrices)
                 Console.WriteLine($"  🔴 SELL Collected: {price} ref");
-            }
+
+            decimal buy = CalculateSmartPrice(buyPrices, "BUY");
+            decimal sell = CalculateSmartPrice(sellPrices, "SELL");
+
+            Console.WriteLine($"🎯 Final BUY Price: {buy}");
+            Console.WriteLine($"🎯 Final SELL Price: {sell}");
 
             return new PriceResult
             {
                 Name = itemName,
-                MostCommonBuyPrice = mostCommonBuyPrice,
-                MostCommonSellPrice = mostCommonSellPrice
+                MostCommonBuyPrice = buy,
+                MostCommonSellPrice = sell
             };
         }
 
-
-
-
-        private decimal GetMostFrequentPrice(List<decimal> prices)
+        private decimal CalculateSmartPrice(List<decimal> prices, string label)
         {
-            Dictionary<decimal, int> frequencyMap = new Dictionary<decimal, int>();
-
-            foreach (decimal price in prices)
+            if (prices.Count < 5)
             {
-                if (!frequencyMap.ContainsKey(price))
+                Console.WriteLine($"⚠️ Not enough valid {label} listings.");
+                return 0;
+            }
+
+            // 1. Trim top/bottom 10%
+            var sorted = prices.OrderBy(p => p).ToList();
+            int trimCount = (int)(sorted.Count * 0.10m);
+            var trimmed = sorted.Skip(trimCount).Take(sorted.Count - 2 * trimCount).ToList();
+
+            if (trimmed.Count < 3)
+            {
+                Console.WriteLine($"⚠️ Too few {label} listings after trimming.");
+                return 0;
+            }
+
+            // 2. Count frequency with bias
+            Dictionary<decimal, int> frequency = new();
+            foreach (var price in trimmed)
+            {
+                int weight = 1;
+
+                if (label == "BUY")
                 {
-                    frequencyMap[price] = 1;
+                    weight += (int)Math.Round(price); // bias toward higher price
                 }
                 else
                 {
-                    frequencyMap[price]++;
+                    weight += (int)Math.Round(100 - price); // bias toward lower price
                 }
+
+                if (!frequency.ContainsKey(price))
+                    frequency[price] = weight;
+                else
+                    frequency[price] += weight;
             }
 
-            decimal mostFrequent = 0;
-            int highestCount = 0;
+            // 3. Pick most frequent with tie-breaker:
+            // BUY → favor higher price, SELL → favor lower price
+            decimal bestPrice = frequency
+                .OrderByDescending(kv => kv.Value)
+                .ThenByDescending(kv => label == "BUY" ? kv.Key : -kv.Key)
+                .First().Key;
 
-            foreach (KeyValuePair<decimal, int> entry in frequencyMap)
-            {
-                if (entry.Value > highestCount)
-                {
-                    highestCount = entry.Value;
-                    mostFrequent = entry.Key;
-                }
-            }
-
-            return mostFrequent;
-
-
+            return bestPrice;
         }
     }
 }

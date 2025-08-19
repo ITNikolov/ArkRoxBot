@@ -23,7 +23,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="ArkRoxBot.csproj" />
+    <Folder Include="Unused\" />
   </ItemGroup>
 
 </Project>

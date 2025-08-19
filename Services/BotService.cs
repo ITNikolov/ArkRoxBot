@@ -1,4 +1,6 @@
-﻿using ArkRoxBot.Interfaces;
+﻿using ArkRoxBot.CommandSystem;
+using ArkRoxBot.Interfaces;
+using ArkRoxBot.Models.Config;
 using System;
 using System.Threading.Tasks;
 
@@ -11,15 +13,28 @@ namespace ArkRoxBot.Services
         private readonly IKeyPriceTracker _keyTracker;
         private readonly PriceStore _priceStore;
         private readonly CommandService _commandService;
+        private readonly ItemConfigLoader _configLoader;
+        private readonly BackpackListingService _listingService;
 
 
-        public BotService(PlaywrightScraper scraper, PriceCalculator calculator, IKeyPriceTracker keyTracker, PriceStore priceStore, CommandService commandService)
+
+        public BotService(
+    PlaywrightScraper scraper,
+    PriceCalculator calculator,
+    IKeyPriceTracker keyTracker,
+    PriceStore priceStore,
+    CommandService commandService,
+    ItemConfigLoader configLoader,
+    BackpackListingService listingService)
         {
             _scraper = scraper;
             _calculator = calculator;
             _keyTracker = keyTracker;
             _priceStore = priceStore;
             _commandService = commandService;
+            _configLoader = configLoader;
+            _listingService = listingService;
+
         }
 
         public async Task RunAsync()
@@ -50,6 +65,10 @@ namespace ArkRoxBot.Services
                 Console.WriteLine($"💬 BOT: {response}");
 
             }
+
+            ConfigRoot config = _configLoader.LoadItems();
+            await _listingService.RefreshListingsAsync(config, _priceStore);
+
         }
 
 

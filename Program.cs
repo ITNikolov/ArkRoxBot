@@ -1,4 +1,5 @@
-﻿using ArkRoxBot.Interfaces;
+﻿using ArkRoxBot.CommandSystem;
+using ArkRoxBot.Interfaces;
 using ArkRoxBot.Models;
 using ArkRoxBot.Services;
 using Microsoft.Extensions.DependencyInjection;
@@ -13,6 +14,9 @@ var host = Host.CreateDefaultBuilder(args)
         services.AddSingleton<PriceCalculator>();
         services.AddSingleton<PlaywrightScraper>();
         services.AddSingleton<PriceStore>();
+        services.AddSingleton<BackpackListingService>();
+        services.AddSingleton<ItemConfigLoader>(provider =>
+    new ItemConfigLoader("Data/items.json"));
         services.AddSingleton<BotService>(); // Main bot runner
     })
     .Build();
