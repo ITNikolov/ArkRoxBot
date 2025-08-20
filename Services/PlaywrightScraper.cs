@@ -124,27 +124,10 @@ namespace ArkRoxBot.Services
                 return allListings;
             }
 
-            PriceResult result = _priceCalculator.Calculate(itemName, allListings);
-
-            if (itemName == "Mann Co. Supply Crate Key")
-            {
-                _keyPriceTracker.MostCommonBuyPrice = result.MostCommonBuyPrice;
-                _keyPriceTracker.MostCommonSellPrice = result.MostCommonSellPrice;
-                _keyPriceTracker.LastUpdated = DateTime.Now;
-
-                Console.WriteLine($"Key Price Updated → Buy: {result.MostCommonBuyPrice} | Sell: {result.MostCommonSellPrice}");
-            }
-            else
-            {
-                Console.WriteLine($"Item Price Calculated → {itemName}: Buy = {result.MostCommonBuyPrice} | Sell = {result.MostCommonSellPrice}");
-            }
+            Console.WriteLine($"✅ Listings collected for '{itemName}': {allListings.Count}");
 
             return allListings;
         }
-
-
-
-
 
         private async Task<List<ListingData>> ExtractListingsFromPageAsync(IPage page)
         {
