@@ -16,7 +16,7 @@ namespace ArkRoxBot.Services
         {
             if (!File.Exists(_filePath))
             {
-                Console.WriteLine($"❌ Error: Could not find config file at {_filePath}");
+                Console.WriteLine($"Error: Could not find config file at {_filePath}");
                 return new ConfigRoot();
             }
 

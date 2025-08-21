@@ -25,7 +25,7 @@ namespace ArkRoxBot.Services
             {
                 if (!_priceParser.TryParseToRefined(listing.Price, out decimal refinedPrice))
                 {
-                    Console.WriteLine($"❌ Could not parse listing price: '{listing.Price}'");
+                    Console.WriteLine($"Could not parse listing price: '{listing.Price}'");
                     continue;
                 }
 
@@ -44,8 +44,8 @@ namespace ArkRoxBot.Services
             decimal buyPrice = GetSmartPrice(buyPrices, "BUY");
             decimal sellPrice = GetSmartPrice(sellPrices, "SELL");
 
-            Console.WriteLine($"🟢 Final BUY Price: {buyPrice} ref");
-            Console.WriteLine($"🔴 Final SELL Price: {sellPrice} ref");
+            Console.WriteLine($"Final BUY Price: {buyPrice} ref");
+            Console.WriteLine($"Final SELL Price: {sellPrice} ref");
 
             return new PriceResult
             {
@@ -127,7 +127,7 @@ namespace ArkRoxBot.Services
 
             decimal bestPrice = ordered.First().Key;
 
-            Console.WriteLine($"🎯 Final {label} Price: {bestPrice} ref");
+            Console.WriteLine($"Final {label} Price: {bestPrice} ref");
             return bestPrice;
         }
     }

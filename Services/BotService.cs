@@ -46,7 +46,7 @@ namespace ArkRoxBot.Services
             var keyListings = await _scraper.FetchAllPagesAsync(keyName);
             if (keyListings.Count == 0)
             {
-                Console.WriteLine("⛔ No listings found for key.");
+                Console.WriteLine("No listings found for key.");
                 return;
             }
 
@@ -58,11 +58,11 @@ namespace ArkRoxBot.Services
                 var hatResult = _calculator.Calculate(hatName, hatListings);
                 _priceStore.SetPrice(hatName, hatResult);
 
-                Console.WriteLine($"✅ Item Price Calculated → {hatName}: Buy = {hatResult.MostCommonBuyPrice} | Sell = {hatResult.MostCommonSellPrice}");
+                Console.WriteLine($"Item Price Calculated → {hatName}: Buy = {hatResult.MostCommonBuyPrice} | Sell = {hatResult.MostCommonSellPrice}");
 
                 string fakeMessage = "!price Team Captain";
                 string response = _commandService.HandleCommand(fakeMessage);
-                Console.WriteLine($"💬 BOT: {response}");
+                Console.WriteLine($"BOT: {response}");
 
             }
 

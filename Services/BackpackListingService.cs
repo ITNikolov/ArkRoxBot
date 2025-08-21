@@ -25,8 +25,8 @@ namespace ArkRoxBot.Services
 
             HttpResponseMessage response = await _http.SendAsync(request);
             Console.WriteLine(response.IsSuccessStatusCode
-                ? "🧹 All listings cleared from Backpack.tf"
-                : $"❌ Failed to clear listings: {response.StatusCode}");
+                ? "All listings cleared from Backpack.tf"
+                : $"Failed to clear listings: {response.StatusCode}");
         }
 
         public async Task PostBuyListingAsync(string itemName, decimal price, int quantity)

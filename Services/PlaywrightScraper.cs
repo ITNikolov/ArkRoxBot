@@ -60,7 +60,7 @@ namespace ArkRoxBot.Services
                 new Cookie
                 {
                     Name = "cf_clearance",
-                    Value = "J9Mtt4bpH_YXd3ejlRaF2...", // truncated for readability
+                    Value = "J9Mtt4bpH_YXd3ejlRaF2...", 
                     Domain = "backpack.tf",
                     Path = "/"
                 }
@@ -89,16 +89,9 @@ namespace ArkRoxBot.Services
                 State = WaitForSelectorState.Visible
             });
 
-            // Removed: await ExtractListingsFromPageAsync(_sharedPage); ❌
 
             return await _sharedPage.ContentAsync();
         }
-
-
-        //public async Task UpdateKeyPriceAsync()
-        //{
-        //    await FetchAllPagesAsync("Mann Co. Supply Crate Key");
-        // }
 
         public async Task<List<ListingData>> FetchAllPagesAsync(string itemName)
         {
@@ -124,7 +117,7 @@ namespace ArkRoxBot.Services
                 return allListings;
             }
 
-            Console.WriteLine($"✅ Listings collected for '{itemName}': {allListings.Count}");
+            Console.WriteLine($"Listings collected for '{itemName}': {allListings.Count}");
 
             return allListings;
         }
@@ -166,7 +159,7 @@ namespace ArkRoxBot.Services
                 Console.WriteLine($"{(isBuy ? "BUY" : "SELL")} | {price} ref");
             }
 
-            Console.WriteLine($" Listings added: {results.Count} | ❌ Skipped: {skipped}");
+            Console.WriteLine($"Listings added: {results.Count} | ❌ Skipped: {skipped}");
             return results;
 
         }

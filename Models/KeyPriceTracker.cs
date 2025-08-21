@@ -17,7 +17,7 @@ namespace ArkRoxBot.Models
             MostCommonSellPrice = result.MostCommonSellPrice;
             LastUpdated = DateTime.Now;
 
-            Console.WriteLine($"🔑 Key Price Updated → Buy = {MostCommonBuyPrice} | Sell = {MostCommonSellPrice} (as of {LastUpdated})");
+            Console.WriteLine($"Key Price Updated → Buy = {MostCommonBuyPrice} | Sell = {MostCommonSellPrice} (as of {LastUpdated})");
         }
 
 

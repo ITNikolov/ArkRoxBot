@@ -2,14 +2,14 @@
   "BuyConfig": [
     {
       "Name": "Team Captain",
-      "MaxQuantity": 3,
+      "MaxQuantity": 2,
       "BuyPrice": 1.33
     }
   ],
   "SellConfig": [
     {
       "Name": "Team Captain",
-      "Quantity": 3,
+      "Quantity": 2,
       "MinSellPrice": 1.44,
       "SellPrice": 2.00
     }
