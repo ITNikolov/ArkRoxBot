@@ -25,3 +25,4 @@ await host.Services.GetRequiredService<BotService>().RunAsync();
 
 Console.WriteLine("Press ENTER to exit...");
 Console.ReadLine();
+// sell orderite imat li nujda ot kut 10 % on top ? pri polojenie che tam se namirat nai evtinnite listingi i te pravi malko ne konkurentno sposoben sprqmo drugite bottove 10 % bottom trim e okay 

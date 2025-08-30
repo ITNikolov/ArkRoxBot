@@ -44,9 +44,6 @@ namespace ArkRoxBot.Services
             decimal buyPrice = GetSmartPrice(buyPrices, "BUY");
             decimal sellPrice = GetSmartPrice(sellPrices, "SELL");
 
-            Console.WriteLine($"Final BUY Price: {buyPrice} ref");
-            Console.WriteLine($"Final SELL Price: {sellPrice} ref");
-
             return new PriceResult
             {
                 Name = itemName,
@@ -64,13 +61,22 @@ namespace ArkRoxBot.Services
             }
 
             List<decimal> sorted = prices.OrderBy(p => p).ToList();
-            int trim = (int)(sorted.Count * 0.10m);
-            List<decimal> trimmed = sorted.Skip(trim).Take(sorted.Count - 2 * trim).ToList();
+            List<decimal> trimmed;
 
-            if (trimmed.Count < 3)
+            if (label == "BUY")
             {
-                Console.WriteLine($"Too few {label} listings after trimming. Skipping.");
-                return 0;
+                int trim = (int)(sorted.Count * 0.10m);
+                trimmed = sorted.Skip(trim).Take(sorted.Count - 2 * trim).ToList();
+
+                if (trimmed.Count < 3)
+                {
+                    Console.WriteLine($"Too few {label} listings after trimming. Skipping.");
+                    return 0;
+                }
+            }
+            else
+            {
+                trimmed = sorted;
             }
 
             decimal median = trimmed[trimmed.Count / 2];
@@ -98,7 +104,6 @@ namespace ArkRoxBot.Services
                 frequency[price]++;
             }
 
-            // Add +1 frequency bias to higher-than-median (BUY) or lower-than-median (SELL)
             foreach (decimal price in pocket)
             {
                 bool favorHighBuy = label == "BUY" && price > median;
@@ -130,5 +135,6 @@ namespace ArkRoxBot.Services
             Console.WriteLine($"Final {label} Price: {bestPrice} ref");
             return bestPrice;
         }
+
     }
 }

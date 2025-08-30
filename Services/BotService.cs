@@ -41,7 +41,6 @@ namespace ArkRoxBot.Services
         {
             await _scraper.InitAsync();
 
-            // Only this one time!
             string keyName = "Mann Co. Supply Crate Key";
             var keyListings = await _scraper.FetchAllPagesAsync(keyName);
             if (keyListings.Count == 0)
@@ -50,26 +49,29 @@ namespace ArkRoxBot.Services
                 return;
             }
 
-            // Team Captain logic
-            string hatName = "Team Captain";
-            var hatListings = await _scraper.FetchAllPagesAsync(hatName);
-            if (hatListings.Count > 0)
+            ConfigRoot config = _configLoader.LoadItems();
+            var itemNames = config.BuyConfig.Select(b => b.Name)
+                .Concat(config.SellConfig.Select(s => s.Name))
+                .Distinct();
+
+            foreach (string itemName in itemNames)
             {
-                var hatResult = _calculator.Calculate(hatName, hatListings);
-                _priceStore.SetPrice(hatName, hatResult);
+                var listings = await _scraper.FetchAllPagesAsync(itemName);
+                if (listings.Count == 0)
+                {
+                    Console.WriteLine($"No listings found for {itemName}. Skipping.");
+                    continue;
+                }
 
-                Console.WriteLine($"Item Price Calculated → {hatName}: Buy = {hatResult.MostCommonBuyPrice} | Sell = {hatResult.MostCommonSellPrice}");
+                var result = _calculator.Calculate(itemName, listings);
+                _priceStore.SetPrice(itemName, result);
 
-                string fakeMessage = "!price Team Captain";
-                string response = _commandService.HandleCommand(fakeMessage);
-                Console.WriteLine($"BOT: {response}");
-
+                Console.WriteLine($"Item Price Calculated → {itemName}: Buy = {result.MostCommonBuyPrice} | Sell = {result.MostCommonSellPrice}");
             }
 
-            ConfigRoot config = _configLoader.LoadItems();
             await _listingService.RefreshListingsAsync(config, _priceStore);
-
         }
+
 
 
     }
