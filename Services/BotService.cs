@@ -1,7 +1,10 @@
 ﻿using ArkRoxBot.CommandSystem;
 using ArkRoxBot.Interfaces;
+using ArkRoxBot.Models;
 using ArkRoxBot.Models.Config;
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 
 namespace ArkRoxBot.Services
@@ -16,16 +19,14 @@ namespace ArkRoxBot.Services
         private readonly ItemConfigLoader _configLoader;
         private readonly BackpackListingService _listingService;
 
-
-
         public BotService(
-    PlaywrightScraper scraper,
-    PriceCalculator calculator,
-    IKeyPriceTracker keyTracker,
-    PriceStore priceStore,
-    CommandService commandService,
-    ItemConfigLoader configLoader,
-    BackpackListingService listingService)
+            PlaywrightScraper scraper,
+            PriceCalculator calculator,
+            IKeyPriceTracker keyTracker,
+            PriceStore priceStore,
+            CommandService commandService,
+            ItemConfigLoader configLoader,
+            BackpackListingService listingService)
         {
             _scraper = scraper;
             _calculator = calculator;
@@ -34,7 +35,6 @@ namespace ArkRoxBot.Services
             _commandService = commandService;
             _configLoader = configLoader;
             _listingService = listingService;
-
         }
 
         public async Task RunAsync()
@@ -42,37 +42,82 @@ namespace ArkRoxBot.Services
             await _scraper.InitAsync();
 
             string keyName = "Mann Co. Supply Crate Key";
-            var keyListings = await _scraper.FetchAllPagesAsync(keyName);
+            List<ListingData> keyListings = await _scraper.FetchAllPagesAsync(keyName);
             if (keyListings.Count == 0)
             {
                 Console.WriteLine("No listings found for key.");
                 return;
             }
 
+            // NEW: calculate, track, store, and log the KEY price
+            PriceResult keyResult = _calculator.Calculate(keyName, keyListings);
+            _keyTracker.UpdatePrices(keyResult);                   // so PriceParser can use current key sell price
+            _priceStore.SetPrice(keyName, keyResult);              // so it appears in summary / !price
+            string keyBuyText = keyResult.MostCommonBuyPrice > 0 ? keyResult.MostCommonBuyPrice.ToString("0.00") : "—";
+            string keySellText = keyResult.MostCommonSellPrice > 0 ? keyResult.MostCommonSellPrice.ToString("0.00") : "—";
+            Console.WriteLine("[FINAL] " + keyName + "  BUY: " + keyBuyText + " | SELL: " + keySellText);
+
+            // then proceed with the rest of the items
             ConfigRoot config = _configLoader.LoadItems();
-            var itemNames = config.BuyConfig.Select(b => b.Name)
+            IEnumerable<string> itemNames = config.BuyConfig.Select(b => b.Name)
                 .Concat(config.SellConfig.Select(s => s.Name))
                 .Distinct();
 
             foreach (string itemName in itemNames)
             {
-                var listings = await _scraper.FetchAllPagesAsync(itemName);
+                List<ListingData> listings = await _scraper.FetchAllPagesAsync(itemName);
                 if (listings.Count == 0)
                 {
-                    Console.WriteLine($"No listings found for {itemName}. Skipping.");
+                    Console.WriteLine("No listings found for " + itemName + ". Skipping.");
                     continue;
                 }
 
-                var result = _calculator.Calculate(itemName, listings);
+                PriceResult result = _calculator.Calculate(itemName, listings);
                 _priceStore.SetPrice(itemName, result);
 
-                Console.WriteLine($"Item Price Calculated → {itemName}: Buy = {result.MostCommonBuyPrice} | Sell = {result.MostCommonSellPrice}");
+                string buyText = result.MostCommonBuyPrice > 0 ? result.MostCommonBuyPrice.ToString("0.00") : "—";
+                string sellText = result.MostCommonSellPrice > 0 ? result.MostCommonSellPrice.ToString("0.00") : "—";
+                Console.WriteLine("[FINAL] " + itemName + "  BUY: " + buyText + " | SELL: " + sellText);
             }
+
+            // Summary after everything (now includes the key)
+            PrintPriceSummary();
 
             await _listingService.RefreshListingsAsync(config, _priceStore);
         }
 
 
+        private void PrintPriceSummary()
+        {
+            IReadOnlyDictionary<string, PriceResult> snapshot = _priceStore.GetAllPrices();
+            IEnumerable<KeyValuePair<string, PriceResult>> ordered =
+                snapshot.OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase);
 
+            Console.WriteLine();
+            Console.WriteLine("========== PRICE SUMMARY (ref) ==========");
+            Console.WriteLine(string.Format("{0,-40} {1,12} {2,12}  {3}", "Item", "BUY", "SELL", "Notes"));
+            Console.WriteLine(new string('-', 80));
+
+            foreach (KeyValuePair<string, PriceResult> kv in ordered)
+            {
+                string itemName = kv.Key;
+                PriceResult result = kv.Value;
+
+                string buy = result.MostCommonBuyPrice > 0 ? result.MostCommonBuyPrice.ToString("0.00") : "—";
+                string sell = result.MostCommonSellPrice > 0 ? result.MostCommonSellPrice.ToString("0.00") : "—";
+
+                string note = string.Empty;
+                if (result.MostCommonBuyPrice > 0 && result.MostCommonSellPrice > 0 &&
+                    result.MostCommonBuyPrice >= result.MostCommonSellPrice)
+                {
+                    note = "buy ≥ sell";
+                }
+
+                Console.WriteLine(string.Format("{0,-40} {1,12} {2,12}  {3}", itemName, buy, sell, note));
+            }
+
+            Console.WriteLine(new string('-', 80));
+            Console.WriteLine("End of summary.");
+        }
     }
 }

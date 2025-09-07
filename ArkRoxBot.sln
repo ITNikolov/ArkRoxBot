@@ -7,6 +7,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ArkRoxBot", "ArkRoxBot.cspr
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ArkRoxBot.Tests", "..\ArkRoxBot.Tests\ArkRoxBot.Tests.csproj", "{1164BFB0-3130-4F49-ABEB-469CCF962646}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ArkRoxBot.SteamTest", "..\ArkRoxBot.SteamTest\ArkRoxBot.SteamTest.csproj", "{DD48B0FA-B6F0-481F-BB81-209147270F33}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -21,6 +23,10 @@ Global
 		{1164BFB0-3130-4F49-ABEB-469CCF962646}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{1164BFB0-3130-4F49-ABEB-469CCF962646}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{1164BFB0-3130-4F49-ABEB-469CCF962646}.Release|Any CPU.Build.0 = Release|Any CPU
+		{DD48B0FA-B6F0-481F-BB81-209147270F33}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{DD48B0FA-B6F0-481F-BB81-209147270F33}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{DD48B0FA-B6F0-481F-BB81-209147270F33}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{DD48B0FA-B6F0-481F-BB81-209147270F33}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
