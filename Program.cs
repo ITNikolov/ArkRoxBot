@@ -1,28 +1,53 @@
-﻿using ArkRoxBot.CommandSystem;
+﻿using System;
+using System.Threading.Tasks;
+using ArkRoxBot.CommandSystem;
 using ArkRoxBot.Interfaces;
 using ArkRoxBot.Models;
 using ArkRoxBot.Services;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 
-var host = Host.CreateDefaultBuilder(args)
-    .ConfigureServices((context, services) =>
+internal static class Program
+{
+    public static async Task Main(string[] args)
     {
-        services.AddSingleton<CommandService>();
-        services.AddSingleton<IKeyPriceTracker, KeyPriceTracker>();
-        services.AddSingleton<IPriceParser, PriceParser>();
-        services.AddSingleton<PriceCalculator>();
-        services.AddSingleton<PlaywrightScraper>();
-        services.AddSingleton<PriceStore>();
-        services.AddSingleton<BackpackListingService>();
-        services.AddSingleton<ItemConfigLoader>(provider =>
-    new ItemConfigLoader("Data/items.json"));
-        services.AddSingleton<BotService>(); // Main bot runner
-    })
-    .Build();
+        IHost host = Host.CreateDefaultBuilder(args)
+            .ConfigureServices((HostBuilderContext context, IServiceCollection services) =>
+            {
+                services.AddSingleton<CommandService>();
+                services.AddSingleton<IKeyPriceTracker, KeyPriceTracker>();
+                services.AddSingleton<IPriceParser, PriceParser>();
+                services.AddSingleton<PriceCalculator>();
+                services.AddSingleton<PlaywrightScraper>();
+                services.AddSingleton<PriceStore>();
+                services.AddSingleton<BackpackListingService>();
+                services.AddSingleton<ItemConfigLoader>(sp => new ItemConfigLoader("Data/items.json"));
 
-await host.Services.GetRequiredService<BotService>().RunAsync();
+                // Steam + orchestrator
+                services.AddSingleton<ISteamClientService, SteamClientService>();
+                services.AddSingleton<BotService>();
+            })
+            .Build();
 
-Console.WriteLine("Press ENTER to exit...");
-Console.ReadLine();
-// sell orderite imat li nujda ot kut 10 % on top ? pri polojenie che tam se namirat nai evtinnite listingi i te pravi malko ne konkurentno sposoben sprqmo drugite bottove 10 % bottom trim e okay 
+        ISteamClientService steam = host.Services.GetRequiredService<ISteamClientService>();
+        BotService bot = host.Services.GetRequiredService<BotService>();
+
+        Console.Write("Steam username: ");
+        string username = Console.ReadLine() ?? string.Empty;
+
+        Console.Write("Steam password: ");
+        string password = Console.ReadLine() ?? string.Empty;
+
+        Console.Write("Steam 2FA (or empty): ");
+        string twoFactor = Console.ReadLine() ?? string.Empty;
+
+        // Start Steam (don’t await; it runs the callback pump)
+        Task connectTask = steam.ConnectAndLoginAsync(username, password, twoFactor);
+
+        // Run your scrape → price → post pipeline once
+        await bot.RunAsync();
+
+        Console.WriteLine("Bot running. Press ENTER to exit...");
+        Console.ReadLine();
+    }
+}

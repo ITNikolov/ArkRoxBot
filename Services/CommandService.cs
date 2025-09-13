@@ -16,22 +16,27 @@ namespace ArkRoxBot.CommandSystem
         {
             input = input.Trim();
 
-            if (input.StartsWith("!price", StringComparison.OrdinalIgnoreCase))
+            // --- PRICE LOOKUP: only respond if we have this item priced (i.e., in PriceStore) ---
+            if (input.StartsWith("!price ", StringComparison.OrdinalIgnoreCase) ||
+                input.StartsWith("!prices ", StringComparison.OrdinalIgnoreCase))
             {
-                string[] parts = input.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
-                if (parts.Length < 2)
-                    return "Please provide an item name. Example: !price Team Captain";
+                // extract item name after the first space
+                int space = input.IndexOf(' ');
+                string itemName = space >= 0 ? input.Substring(space + 1).Trim() : string.Empty;
 
-                string itemName = parts[1];
-                if (_priceStore.GetPrice(itemName) is PriceResult price)
-                {
-                    return $"{itemName} → Buy Price: {price.MostCommonBuyPrice} ref | Sell Price: {price.MostCommonSellPrice} ref";
-                }
-                else
-                {
-                    return $"No price found for '{itemName}'. Maybe it's not scraped yet?";
-                }
+                if (string.IsNullOrWhiteSpace(itemName))
+                    return "Usage: !price <item name>";
+
+                ArkRoxBot.Models.PriceResult price;
+                bool found = _priceStore.TryGetPrice(itemName, out price);
+                if (!found)
+                    return "I don’t trade that item right now.";
+
+                string buyText = price.MostCommonBuyPrice > 0 ? price.MostCommonBuyPrice.ToString("0.00") : "—";
+                string sellText = price.MostCommonSellPrice > 0 ? price.MostCommonSellPrice.ToString("0.00") : "—";
+                return itemName + " — BUY: " + buyText + " | SELL: " + sellText;
             }
+
 
             if (input.StartsWith("!buy", StringComparison.OrdinalIgnoreCase))
             {

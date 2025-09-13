@@ -11,6 +11,7 @@ namespace ArkRoxBot.Services
 {
     public class BotService
     {
+        private readonly ISteamClientService _steam;
         private readonly PlaywrightScraper _scraper;
         private readonly PriceCalculator _calculator;
         private readonly IKeyPriceTracker _keyTracker;
@@ -20,6 +21,7 @@ namespace ArkRoxBot.Services
         private readonly BackpackListingService _listingService;
 
         public BotService(
+            ISteamClientService steam,
             PlaywrightScraper scraper,
             PriceCalculator calculator,
             IKeyPriceTracker keyTracker,
@@ -28,6 +30,7 @@ namespace ArkRoxBot.Services
             ItemConfigLoader configLoader,
             BackpackListingService listingService)
         {
+            _steam = steam;
             _scraper = scraper;
             _calculator = calculator;
             _keyTracker = keyTracker;
@@ -35,10 +38,37 @@ namespace ArkRoxBot.Services
             _commandService = commandService;
             _configLoader = configLoader;
             _listingService = listingService;
+
         }
+
+        private bool _chatWired = false;
+
+        private void EnsureChatWired()
+        {
+            if (_chatWired) return;
+
+            _steam.OnFriendMessage += (string steamId, string text) =>
+            {
+                try
+                {
+                    string reply = _commandService.HandleCommand(text);
+                    if (!string.IsNullOrWhiteSpace(reply))
+                        _steam.SendMessage(steamId, reply);
+                }
+                catch (Exception ex)
+                {
+                    _steam.SendMessage(steamId, "Sorry, that command is unknown.");
+                    Console.WriteLine("Command error: " + ex);
+                }
+            };
+
+            _chatWired = true;
+        }
+
 
         public async Task RunAsync()
         {
+            EnsureChatWired();
             await _scraper.InitAsync();
 
             string keyName = "Mann Co. Supply Crate Key";

@@ -1,132 +1,90 @@
 ﻿using System;
+using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using SteamKit2;
 using ArkRoxBot.Interfaces;
-using SteamKit2.WebUI.Internal;
 
 namespace ArkRoxBot.Services
 {
-    public class SteamClientService : ISteamClientService
+    public sealed class SteamClientService : ISteamClientService
     {
+        // SteamKit handlers
         private readonly SteamClient _client;
-        private readonly CallbackManager _callbacks;
+        private readonly CallbackManager _callbackManager;
         private readonly SteamUser _user;
         private readonly SteamFriends _friends;
 
+        // Bubble friend messages to bot logic
         public event Action<string, string>? OnFriendMessage;
 
-        private string _username = "";
-        private string _password = "";
-        private string? _twoFactor = null;
+        // Credentials provided at connect time
+        private string _username = string.Empty;
+        private string _password = string.Empty;
+        private string? _twoFactorCode = null;
 
-        private bool _keepPumping = false;
+        // Callback pump
+        private bool _shouldPumpCallbacks = false;
 
-        private readonly System.Collections.Generic.Dictionary<string, DateTime> _lastMessageUtc
-    = new System.Collections.Generic.Dictionary<string, DateTime>();
-
-        // Protect these accounts from being removed
-        private readonly System.Collections.Generic.HashSet<string> _whitelist
-            = new System.Collections.Generic.HashSet<string>
-            {
-                "7656119XXXXXXXXXX"
-            };
-
-        private int _maxFriends = 250;
-
-        // RNG for random pruning
-        private readonly System.Random _rng = new System.Random();
-
-
+        // Friend management
+        private readonly Dictionary<string, DateTime> _lastMessageUtcBySteamId = new Dictionary<string, DateTime>();
+        private readonly HashSet<string> _whitelistSteamIds = new HashSet<string> { "7656119XXXXXXXXXX" };
+        private readonly Random _random = new Random();
+        private int _maxFriends = 200;
 
         public SteamClientService()
         {
             _client = new SteamClient();
-            _callbacks = new CallbackManager(_client);
+            _callbackManager = new CallbackManager(_client);
             _user = _client.GetHandler<SteamUser>();
             _friends = _client.GetHandler<SteamFriends>();
 
-            // SteamKit2 v3 pattern:
-            _callbacks.Subscribe<SteamClient.ConnectedCallback>(OnConnected);
-            _callbacks.Subscribe<SteamClient.DisconnectedCallback>(OnDisconnected);
-            _callbacks.Subscribe<SteamUser.LoggedOnCallback>(OnLoggedOn);
-            _callbacks.Subscribe<SteamUser.LoggedOffCallback>(OnLoggedOff);
-            _callbacks.Subscribe<SteamFriends.FriendMsgCallback>(OnFriendMsg);
-            _callbacks.Subscribe<SteamFriends.FriendsListCallback>(OnFriendsList);
-
+            // Core subscriptions (no sentry / no login-key handlers)
+            _callbackManager.Subscribe<SteamClient.ConnectedCallback>(OnConnected);
+            _callbackManager.Subscribe<SteamClient.DisconnectedCallback>(OnDisconnected);
+            _callbackManager.Subscribe<SteamUser.LoggedOnCallback>(OnLoggedOn);
+            _callbackManager.Subscribe<SteamUser.LoggedOffCallback>(OnLoggedOff);
+            _callbackManager.Subscribe<SteamFriends.FriendMsgCallback>(OnFriendMessageReceived);
+            _callbackManager.Subscribe<SteamFriends.FriendsListCallback>(OnFriendsListUpdated);
         }
 
-        public async Task ConnectAndLoginAsync(string username, string password, string? twoFactor = null)
+        public async Task ConnectAndLoginAsync(string username, string password, string? twoFactorCode = null)
         {
             _username = username;
             _password = password;
-            _twoFactor = twoFactor;
+            _twoFactorCode = twoFactorCode;
 
             Console.WriteLine("Steam: Connecting…");
-            _keepPumping = true;
+            _shouldPumpCallbacks = true;
             _client.Connect();
 
-            // Keep pumping until explicitly stopped (so we can receive messages)
             await Task.Run(() =>
             {
-                while (_keepPumping)
+                while (_shouldPumpCallbacks)
                 {
-                    _callbacks.RunWaitCallbacks(TimeSpan.FromMilliseconds(100));
+                    _callbackManager.RunWaitCallbacks(TimeSpan.FromMilliseconds(100));
                 }
             });
         }
 
-        // NEW: send a chat message back
-        public void SendMessage(string steamId64, string text)
-        {
-            SteamID id = new SteamID(Convert.ToUInt64(steamId64));
-            _friends.SendChatMessage(id, EChatEntryType.ChatMsg, text ?? string.Empty);
-        }
+        // -------------------------
+        // Login (password + 2FA only)
+        // -------------------------
 
         private void OnConnected(SteamClient.ConnectedCallback callback)
         {
-            Console.WriteLine("Steam: Connected. Logging in…");
+            Console.WriteLine("Steam: Connected. Logging in with password + 2FA…");
 
             SteamUser.LogOnDetails details = new SteamUser.LogOnDetails
             {
                 Username = _username,
-                Password = _password,
-                TwoFactorCode = _twoFactor
+                Password = _password,          // always send password
+                TwoFactorCode = _twoFactorCode // provide Steam Guard code each run
+                // No SentryFileHash
+                // No LoginKey
             };
 
             _user.LogOn(details);
-        }
-
-        private void OnFriendsList(SteamFriends.FriendsListCallback callback)
-        {
-            // Accept any inbound friend requests
-            foreach (SteamFriends.FriendsListCallback.Friend f in callback.FriendList)
-            {
-                if (f.Relationship == EFriendRelationship.RequestRecipient)
-                {
-                    SteamID id = f.SteamID;
-                    Console.WriteLine("Friend request from " + id.ConvertToUInt64() + " → accepting.");
-                    _friends.AddFriend(id);
-
-                    // tiny pause so Steam applies the relationship
-                    System.Threading.Thread.Sleep(500);
-
-                    // Send a short welcome
-                    SendMessage(id.ConvertToUInt64().ToString(),
-                        "Hey! I’m a trading bot. Type !help for commands.");
-                }
-
-            }
-
-            // After accepting requests, keep list under the cap
-            PruneFriendsIfNeeded();
-
-        }
-
-
-        private void OnDisconnected(SteamClient.DisconnectedCallback callback)
-        {
-            Console.WriteLine("Steam: Disconnected.");
-            _keepPumping = false;
         }
 
         private void OnLoggedOn(SteamUser.LoggedOnCallback callback)
@@ -135,100 +93,153 @@ namespace ArkRoxBot.Services
             {
                 Console.WriteLine("Steam: Logged on successfully.");
                 _friends.SetPersonaState(EPersonaState.Online);
-                // NOTE: Do NOT set _keepPumping = false; we want to keep receiving messages.
+                return;
+            }
+
+            // Helpful diagnostics for common Steam Guard states
+            if (callback.Result == EResult.AccountLoginDeniedNeedTwoFactor)
+            {
+                Console.WriteLine("Steam: 2FA required (AccountLoginDeniedNeedTwoFactor). Provide a fresh code and reconnect.");
+            }
+            else if (callback.Result == EResult.AccountLogonDenied)
+            {
+                Console.WriteLine("Steam: Email code required (AccountLogonDenied). Provide the code and reconnect.");
             }
             else
             {
                 Console.WriteLine("Steam: Login failed → " + callback.Result + " (extended: " + callback.ExtendedResult + ")");
-                _keepPumping = false;
             }
+
+            _shouldPumpCallbacks = false;
         }
 
         private void OnLoggedOff(SteamUser.LoggedOffCallback callback)
         {
             Console.WriteLine("Steam: Logged off → " + callback.Result);
-            _keepPumping = false;
+            _shouldPumpCallbacks = false;
         }
-        private void PruneFriendsIfNeeded()
-        {
-            int total = _friends.GetFriendCount();
-            System.Collections.Generic.List<SteamID> allFriends =
-                new System.Collections.Generic.List<SteamID>(total);
 
-            for (int i = 0; i < total; i++)
+        private void OnDisconnected(SteamClient.DisconnectedCallback callback)
+        {
+            Console.WriteLine("Steam: Disconnected.");
+            _shouldPumpCallbacks = false;
+        }
+
+        // -----------------
+        // Friends & chatting
+        // -----------------
+
+        public void SendMessage(string steamId64, string text)
+        {
+            SteamID steamId = new SteamID(Convert.ToUInt64(steamId64));
+            string safeText = text ?? string.Empty;
+            _friends.SendChatMessage(steamId, EChatEntryType.ChatMsg, safeText);
+        }
+
+        private void OnFriendsListUpdated(SteamFriends.FriendsListCallback callback)
+        {
+            foreach (SteamFriends.FriendsListCallback.Friend friend in callback.FriendList)
             {
-                SteamID id = _friends.GetFriendByIndex(i);
-                if (_friends.GetFriendRelationship(id) == EFriendRelationship.Friend)
+                if (friend.Relationship == EFriendRelationship.RequestRecipient)
                 {
-                    allFriends.Add(id);
+                    SteamID id = friend.SteamID;
+                    Console.WriteLine("Friend request from " + id.ConvertToUInt64() + " → accepting.");
+                    _friends.AddFriend(id);
+
+                    // let Steam apply the relationship
+                    Thread.Sleep(500);
+
+                    SendMessage(id.ConvertToUInt64().ToString(),
+                        "Hey! I’m a trading bot. Type !help for commands.");
                 }
             }
 
-            int friendTotal = allFriends.Count;
-            if (friendTotal <= _maxFriends)
-                return;
+            PruneFriendsIfNeeded();
+        }
 
-            DateTime cutoff = DateTime.UtcNow.AddDays(-3);
-            System.Collections.Generic.List<SteamID> candidates =
-                new System.Collections.Generic.List<SteamID>();
+        private void OnFriendMessageReceived(SteamFriends.FriendMsgCallback callback)
+        {
+            if (callback.EntryType != EChatEntryType.ChatMsg)
+            {
+                return;
+            }
+
+            string steamId64 = callback.Sender.ConvertToUInt64().ToString();
+            string message = callback.Message;
+
+            _lastMessageUtcBySteamId[steamId64] = DateTime.UtcNow;
+
+            Console.WriteLine("MSG <" + steamId64 + ">: " + message);
+            Action<string, string>? handler = OnFriendMessage;
+            if (handler != null)
+            {
+                handler.Invoke(steamId64, message);
+            }
+        }
+
+        private void PruneFriendsIfNeeded()
+        {
+            int totalKnown = _friends.GetFriendCount();
+            List<SteamID> allFriends = new List<SteamID>(totalKnown);
+
+            for (int i = 0; i < totalKnown; i++)
+            {
+                SteamID friendId = _friends.GetFriendByIndex(i);
+                if (_friends.GetFriendRelationship(friendId) == EFriendRelationship.Friend)
+                {
+                    allFriends.Add(friendId);
+                }
+            }
+
+            int friendCount = allFriends.Count;
+            if (friendCount <= _maxFriends)
+            {
+                return;
+            }
+
+            DateTime activeCutoffUtc = DateTime.UtcNow.AddDays(-3);
+            List<SteamID> removableCandidates = new List<SteamID>();
 
             foreach (SteamID id in allFriends)
             {
-                string sid = id.ConvertToUInt64().ToString();
-                if (_whitelist.Contains(sid))
+                string steamId64 = id.ConvertToUInt64().ToString();
+                if (_whitelistSteamIds.Contains(steamId64))
+                {
                     continue;
+                }
 
-                DateTime last;
-                bool hasActivity = _lastMessageUtc.TryGetValue(sid, out last);
-                if (hasActivity && last >= cutoff)
-                    continue;
+                DateTime lastMessageUtc;
+                bool hasMessage = _lastMessageUtcBySteamId.TryGetValue(steamId64, out lastMessageUtc);
+                if (hasMessage && lastMessageUtc >= activeCutoffUtc)
+                {
+                    continue; // recently active → keep
+                }
 
-                candidates.Add(id);
+                removableCandidates.Add(id);
             }
 
-            if (candidates.Count == 0)
-                return;
-
-            while (friendTotal > _maxFriends && candidates.Count > 0)
+            if (removableCandidates.Count == 0)
             {
-                int index = _rng.Next(candidates.Count);
-                SteamID removeId = candidates[index];
-                candidates.RemoveAt(index);
+                return;
+            }
 
-                string sid = removeId.ConvertToUInt64().ToString();
-                Console.WriteLine("Pruning friend " + sid + " to keep list under " + _maxFriends + ".");
+            while (friendCount > _maxFriends && removableCandidates.Count > 0)
+            {
+                int pickIndex = _random.Next(removableCandidates.Count);
+                SteamID removeId = removableCandidates[pickIndex];
+                removableCandidates.RemoveAt(pickIndex);
 
-                // NEW: notify them before removal
-                SendMessage(sid,
-                    "Hi! I'm cleaning up my friends list to stay under the Steam limit. " +
-                    "If you want to trade again, feel free to re-add me anytime.");
+                string steamId64 = removeId.ConvertToUInt64().ToString();
+                Console.WriteLine("Pruning friend " + steamId64 + " to stay under " + _maxFriends + ".");
+
+                SendMessage(
+                    steamId64,
+                    "Hi! I'm cleaning up my friends list. If you want to trade again, feel free to re-add me anytime."
+                );
 
                 _friends.RemoveFriend(removeId);
-
-                friendTotal--;
-            }
-
-        }
-
-
-        private void OnFriendMsg(SteamFriends.FriendMsgCallback callback)
-        {
-            if (callback.EntryType != EChatEntryType.ChatMsg)
-                return;
-
-            string steamId64 = callback.Sender.ConvertToUInt64().ToString();
-            string text = callback.Message;
-
-            _lastMessageUtc[steamId64] = DateTime.UtcNow;
-
-            Console.WriteLine("MSG <" + steamId64 + ">: " + text);
-
-            if (OnFriendMessage != null)
-            {
-                OnFriendMessage.Invoke(steamId64, text);
+                friendCount--;
             }
         }
-
-
     }
 }
