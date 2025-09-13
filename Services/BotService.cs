@@ -65,6 +65,21 @@ namespace ArkRoxBot.Services
             _chatWired = true;
         }
 
+        // Fallback SELL: if we couldn’t compute one this run, use previous stored SELL (if any)
+        private void FillMissingSellFromPrevious(string itemName, PriceResult result)
+        {
+            if (result.MostCommonSellPrice > 0)
+                return;
+
+            if (_priceStore.TryGetPrice(itemName, out PriceResult previous) &&
+                previous.MostCommonSellPrice > 0)
+            {
+                result.MostCommonSellPrice = previous.MostCommonSellPrice;
+                Console.WriteLine("[FALLBACK] " + itemName + " SELL → using previous: " + previous.MostCommonSellPrice.ToString("0.00"));
+            }
+        }
+
+
 
         public async Task RunAsync()
         {
@@ -103,7 +118,11 @@ namespace ArkRoxBot.Services
                 }
 
                 PriceResult result = _calculator.Calculate(itemName, listings);
+
+                // SELL fallback for normal items
+                FillMissingSellFromPrevious(itemName, result);
                 _priceStore.SetPrice(itemName, result);
+
 
                 string buyText = result.MostCommonBuyPrice > 0 ? result.MostCommonBuyPrice.ToString("0.00") : "—";
                 string sellText = result.MostCommonSellPrice > 0 ? result.MostCommonSellPrice.ToString("0.00") : "—";

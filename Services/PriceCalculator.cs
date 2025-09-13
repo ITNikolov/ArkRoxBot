@@ -56,7 +56,7 @@ namespace ArkRoxBot.Services
         {
             if (prices.Count < 5)
             {
-                Console.WriteLine($"Not enough valid {label} listings. Skipping.");
+                Console.WriteLine("Not enough valid " + label + " listings. Skipping.");
                 return 0;
             }
 
@@ -70,7 +70,7 @@ namespace ArkRoxBot.Services
 
                 if (trimmed.Count < 3)
                 {
-                    Console.WriteLine($"Too few {label} listings after trimming. Skipping.");
+                    Console.WriteLine("Too few " + label + " listings after trimming. Skipping.");
                     return 0;
                 }
             }
@@ -79,28 +79,51 @@ namespace ArkRoxBot.Services
                 trimmed = sorted;
             }
 
+            // median (keep your original style)
             decimal median = trimmed[trimmed.Count / 2];
-            decimal windowSize = median * 0.15m;
-            decimal min = median - windowSize;
-            decimal max = median + windowSize;
+            Console.WriteLine(label + " median (after trim): " + median.ToString("0.00") + " ref");
 
-            List<decimal> pocket = trimmed.Where(p => p >= min && p <= max).ToList();
+            // ---- Dynamic window (BUY only): 15% → 20%----
+            decimal[] windows = (label == "BUY")
+                ? new decimal[] { 0.15m, 0.20m,}
+                : new decimal[] { 0.15m };
 
-            if (pocket.Count < 3)
+            List<decimal> pocket = new List<decimal>();
+            bool pocketOk = false;
+
+            foreach (decimal w in windows)
             {
-                Console.WriteLine($"Too few {label} listings inside ±15% range. Skipping.");
+                decimal min = median * (1m - w);
+                decimal max = median * (1m + w);
+
+                pocket = trimmed.Where(p => p >= min && p <= max).ToList();
+
+                if (pocket.Count >= 3)
+                {
+                    if (label == "BUY")
+                        Console.WriteLine("BUY: using ±" + (w * 100m).ToString("0") + "% window with " + pocket.Count + " inliers.");
+                    pocketOk = true;
+                    break;
+                }
+                else
+                {
+                    if (label == "BUY")
+                        Console.WriteLine("BUY: ±" + (w * 100m).ToString("0") + "% → " + pocket.Count + " inliers (need 3).");
+                }
+            }
+
+            if (!pocketOk)
+            {
+                Console.WriteLine("Too few " + label + " listings inside allowed window. Skipping.");
                 return 0;
             }
 
+            // ---- frequency with bias (unchanged) ----
             Dictionary<decimal, int> frequency = new Dictionary<decimal, int>();
-
             foreach (decimal price in pocket)
             {
                 if (!frequency.ContainsKey(price))
-                {
                     frequency[price] = 0;
-                }
-
                 frequency[price]++;
             }
 
@@ -110,13 +133,10 @@ namespace ArkRoxBot.Services
                 bool favorLowSell = label == "SELL" && price < median;
 
                 if (favorHighBuy || favorLowSell)
-                {
                     frequency[price]++;
-                }
             }
 
             IOrderedEnumerable<KeyValuePair<decimal, int>> ordered;
-
             if (label == "BUY")
             {
                 ordered = frequency
@@ -131,10 +151,10 @@ namespace ArkRoxBot.Services
             }
 
             decimal bestPrice = ordered.First().Key;
-
-            Console.WriteLine($"Final {label} Price: {bestPrice} ref");
+            Console.WriteLine("Final " + label + " Price: " + bestPrice + " ref");
             return bestPrice;
         }
+
 
     }
 }

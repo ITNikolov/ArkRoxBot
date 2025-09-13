@@ -46,6 +46,9 @@ namespace ArkRoxBot.Services
             _callbackManager.Subscribe<SteamUser.LoggedOffCallback>(OnLoggedOff);
             _callbackManager.Subscribe<SteamFriends.FriendMsgCallback>(OnFriendMessageReceived);
             _callbackManager.Subscribe<SteamFriends.FriendsListCallback>(OnFriendsListUpdated);
+            _callbackManager.Subscribe<SteamFriends.PersonaStateCallback>(OnPersonaStateChanged);
+            _callbackManager.Subscribe<SteamFriends.FriendAddedCallback>(OnFriendAdded);
+
         }
 
         public async Task ConnectAndLoginAsync(string username, string password, string? twoFactorCode = null)
@@ -86,6 +89,53 @@ namespace ArkRoxBot.Services
 
             _user.LogOn(details);
         }
+        // Fires when Steam updates persona/relationship for a single user.
+        // If someone sent us a friend request, their relationship becomes RequestRecipient.
+        private void OnPersonaStateChanged(SteamFriends.PersonaStateCallback callback)
+        {
+            SteamID who = callback.FriendID;
+            EFriendRelationship rel = _friends.GetFriendRelationship(who);
+
+            Console.WriteLine("PersonaState: " + who.ConvertToUInt64() + " rel=" + rel);
+
+            if (rel == EFriendRelationship.RequestRecipient)
+            {
+                Console.WriteLine("Accepting friend request from " + who.ConvertToUInt64());
+                _friends.AddFriend(who);
+                // don’t greet here yet; wait for FriendAddedCallback so we’re definitely friends
+            }
+        }
+
+        // Fires after Steam accepts our AddFriend (or fails).
+        private void OnFriendAdded(SteamFriends.FriendAddedCallback callback)
+        {
+            string sid = callback.SteamID.ConvertToUInt64().ToString();
+
+            if (callback.Result == EResult.OK)
+            {
+                Console.WriteLine("Friend added: " + sid + " → sending welcome.");
+                SendMessage(sid, "Hey! I’m a trading bot. Type !help for commands.");
+                _lastMessageUtcBySteamId[sid] = DateTime.UtcNow; // optional: mark activity
+            }
+            else
+            {
+                Console.WriteLine("AddFriend failed for " + sid + " → " + callback.Result);
+            }
+        }
+        private void AcceptAnyPendingInvites()
+        {
+            int total = _friends.GetFriendCount();
+            for (int i = 0; i < total; i++)
+            {
+                SteamID id = _friends.GetFriendByIndex(i);
+                if (_friends.GetFriendRelationship(id) == EFriendRelationship.RequestRecipient)
+                {
+                    Console.WriteLine("Accepting pending invite (startup) from " + id.ConvertToUInt64());
+                    _friends.AddFriend(id);
+                }
+            }
+        }
+
 
         private void OnLoggedOn(SteamUser.LoggedOnCallback callback)
         {
@@ -93,25 +143,20 @@ namespace ArkRoxBot.Services
             {
                 Console.WriteLine("Steam: Logged on successfully.");
                 _friends.SetPersonaState(EPersonaState.Online);
+                AcceptAnyPendingInvites();   // ← add this
                 return;
             }
 
-            // Helpful diagnostics for common Steam Guard states
             if (callback.Result == EResult.AccountLoginDeniedNeedTwoFactor)
-            {
                 Console.WriteLine("Steam: 2FA required (AccountLoginDeniedNeedTwoFactor). Provide a fresh code and reconnect.");
-            }
             else if (callback.Result == EResult.AccountLogonDenied)
-            {
                 Console.WriteLine("Steam: Email code required (AccountLogonDenied). Provide the code and reconnect.");
-            }
             else
-            {
                 Console.WriteLine("Steam: Login failed → " + callback.Result + " (extended: " + callback.ExtendedResult + ")");
-            }
 
             _shouldPumpCallbacks = false;
         }
+
 
         private void OnLoggedOff(SteamUser.LoggedOffCallback callback)
         {
