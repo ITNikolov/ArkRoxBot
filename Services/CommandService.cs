@@ -1,9 +1,11 @@
-﻿using ArkRoxBot.Models;
+﻿using System;
+using System.Collections.Generic;
+using ArkRoxBot.Models;
 using ArkRoxBot.Services;
 
-namespace ArkRoxBot.CommandSystem
+namespace ArkRoxBot.Services
 {
-    public class CommandService
+    public sealed class CommandService
     {
         private readonly PriceStore _priceStore;
 
@@ -12,87 +14,87 @@ namespace ArkRoxBot.CommandSystem
             _priceStore = priceStore;
         }
 
-        public string HandleCommand(string input)
+        public string HandleCommand(string message)
         {
-            input = input.Trim();
+            if (string.IsNullOrWhiteSpace(message))
+                return string.Empty;
 
-            // --- PRICE LOOKUP: only respond if we have this item priced (i.e., in PriceStore) ---
-            if (input.StartsWith("!price ", StringComparison.OrdinalIgnoreCase) ||
-                input.StartsWith("!prices ", StringComparison.OrdinalIgnoreCase))
-            {
-                // extract item name after the first space
-                int space = input.IndexOf(' ');
-                string itemName = space >= 0 ? input.Substring(space + 1).Trim() : string.Empty;
+            string text = message.Trim();
 
-                if (string.IsNullOrWhiteSpace(itemName))
-                    return "Usage: !price <item name>";
-
-                ArkRoxBot.Models.PriceResult price;
-                bool found = _priceStore.TryGetPrice(itemName, out price);
-                if (!found)
-                    return "I don’t trade that item right now.";
-
-                string buyText = price.MostCommonBuyPrice > 0 ? price.MostCommonBuyPrice.ToString("0.00") : "—";
-                string sellText = price.MostCommonSellPrice > 0 ? price.MostCommonSellPrice.ToString("0.00") : "—";
-                return itemName + " — BUY: " + buyText + " | SELL: " + sellText;
-            }
-
-
-            if (input.StartsWith("!buy", StringComparison.OrdinalIgnoreCase))
-            {
-                string[] parts = input.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
-                if (parts.Length < 2)
-                    return "Please provide the item name. Example: !buy Team Captain";
-
-                string itemName = parts[1];
-                if (_priceStore.GetPrice(itemName) is PriceResult price)
-                {
-                    return $"To buy '{itemName}', please list your item for {price.MostCommonBuyPrice} ref and I will buy it soon.";
-                }
-                else
-                {
-                    return $"No price found for '{itemName}'. Can't process buy request.";
-                }
-            }
-
-            if (input.StartsWith("!sell", StringComparison.OrdinalIgnoreCase))
-            {
-                string[] parts = input.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
-                if (parts.Length < 2)
-                    return "Please provide the item name. Example: !sell Team Captain";
-
-                string itemName = parts[1];
-                if (_priceStore.GetPrice(itemName) is PriceResult price)
-                {
-                    return $"To sell '{itemName}', please list it for {price.MostCommonSellPrice} ref and I will buy it soon.";
-                }
-                else
-                {
-                    return $"No price found for '{itemName}'. Can't process sell request.";
-                }
-            }
-
-            if (input.Equals("!owner", StringComparison.OrdinalIgnoreCase))
-            {
-                return "Bot Owner Profile: https://steamcommunity.com/profiles/76561198085806375/";
-            }
-
-            if (input.Equals("!help", StringComparison.OrdinalIgnoreCase))
+            if (text.Equals("!help", StringComparison.OrdinalIgnoreCase) ||
+                text.Equals("!how2trade", StringComparison.OrdinalIgnoreCase))
             {
                 return "Available Commands: !price <item>, !buy <item>, !sell <item>, !owner, !help, !status";
             }
 
-            if (input.Equals("!status", StringComparison.OrdinalIgnoreCase))
-            {
-                return "Bot is online and running.";
-            }
+            if (text.StartsWith("!price ", StringComparison.OrdinalIgnoreCase))
+                return HandlePrice(text.Substring(7).Trim());
 
-            return "Unknown command. Type !help for more info.";
+            if (text.StartsWith("!buy ", StringComparison.OrdinalIgnoreCase))
+                return HandleUserBuysFromUs(text.Substring(5).Trim());   // uses SELL
+
+            if (text.StartsWith("!sell ", StringComparison.OrdinalIgnoreCase))
+                return HandleUserSellsToUs(text.Substring(6).Trim());     // uses BUY
+
+            if (text.Equals("!owner", StringComparison.OrdinalIgnoreCase))
+                return "Owner: https://steamcommunity.com/id/yourprofile/"; // adjust
+
+            if (text.Equals("!status", StringComparison.OrdinalIgnoreCase))
+                return "Online and pricing. Type !help for commands.";
+
+            return string.Empty;
         }
 
-        public string GetWelcomeMessage()
+        private string HandlePrice(string item)
         {
-            return "Hello! This is an automated trading bot. Type !help to see available commands. Please note: All trades are final. No refunds.";
+            PriceResult? p;
+            if (!TryGetPriceInsensitive(item, out p) || p == null)
+                return "I don’t have a price for '" + item + "' right now.";
+
+            string buy = p.MostCommonBuyPrice > 0 ? p.MostCommonBuyPrice.ToString("0.00") + " ref" : "—";
+            string sell = p.MostCommonSellPrice > 0 ? p.MostCommonSellPrice.ToString("0.00") + " ref" : "—";
+            return item + " — BUY: " + buy + " | SELL: " + sell;
+        }
+
+        // User says "!buy <item>" → user wants to buy from us → show SELL price.
+        private string HandleUserBuysFromUs(string item)
+        {
+            PriceResult? p;
+            if (!TryGetPriceInsensitive(item, out p) || p == null || p.MostCommonSellPrice <= 0)
+                return "I’m not selling '" + item + "' right now.";
+
+            string amt = p.MostCommonSellPrice.ToString("0.00");
+            return "To buy '" + item + "', I sell it for " + amt + " ref. "
+                 + "Send a trade offer and I’ll handle it soon.";
+            // next step: auto-create the offer here via TradeService
+        }
+
+        // User says "!sell <item>" → user wants to sell to us → show BUY price.
+        private string HandleUserSellsToUs(string item)
+        {
+            PriceResult? p;
+            if (!TryGetPriceInsensitive(item, out p) || p == null || p.MostCommonBuyPrice <= 0)
+                return "I’m not buying '" + item + "' right now.";
+
+            string amt = p.MostCommonBuyPrice.ToString("0.00");
+            return "To sell '" + item + "', I pay " + amt + " ref if the item matches. "
+                 + "Send a trade offer and I’ll handle it soon.";
+            // next step: auto-accept based on TradeService checks
+        }
+
+        private bool TryGetPriceInsensitive(string name, out PriceResult? result)
+        {
+            IReadOnlyDictionary<string, PriceResult> all = _priceStore.GetAllPrices();
+            foreach (KeyValuePair<string, PriceResult> kv in all)
+            {
+                if (string.Equals(kv.Key, name, StringComparison.OrdinalIgnoreCase))
+                {
+                    result = kv.Value;
+                    return true;
+                }
+            }
+            result = null;
+            return false;
         }
     }
 }

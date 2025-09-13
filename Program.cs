@@ -6,6 +6,7 @@ using ArkRoxBot.Models;
 using ArkRoxBot.Services;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+
 internal static class Program
 {
     public static async Task Main(string[] args)
@@ -20,9 +21,8 @@ internal static class Program
                 services.AddSingleton<PlaywrightScraper>();
                 services.AddSingleton<PriceStore>();
                 services.AddSingleton<BackpackListingService>();
-                services.AddSingleton<ItemConfigLoader>(sp => new ItemConfigLoader("Data/items.json"));
+                services.AddSingleton<ItemConfigLoader>(_ => new ItemConfigLoader("Data/items.json"));
 
-                // Steam + orchestrator
                 services.AddSingleton<ISteamClientService, SteamClientService>();
                 services.AddSingleton<BotService>();
             })
@@ -32,16 +32,17 @@ internal static class Program
         BotService bot = host.Services.GetRequiredService<BotService>();
 
         Console.Write("Steam username: ");
-        string username = Console.ReadLine() ?? string.Empty;         // username can be visible
-        Console.Write("Steam password: ");
-        string password = ReadMasked("Steam password: ");             // masked
-        Console.Write("Steam 2FA: ");
-        string twoFactor = ReadMasked("Steam 2FA (if any): ");        // masked
+        string username = Console.ReadLine() ?? string.Empty;
 
+        string password = ReadMasked("Steam password: ");
+        string twoFactor = ReadMasked("Steam 2FA (if any): ");
 
-        // Start Steam (don’t await; it runs the callback pump)
+        // 🔹 Start Steam login/callback pump 
+        _ = steam.ConnectAndLoginAsync(username, password, twoFactor);
+
+        // Your temporary hard-coded Web API key + bot id (rotate + remove from git history!)
         string apiKey = "A6FEBC05BEAD8EAC88F2439A5E8B8741";
-        string botId64 = "76561199466477276"; // your bot's SteamID64
+        string botId64 = "76561199466477276";
 
         TradeService trades = new TradeService(
             host.Services.GetRequiredService<PriceStore>(),
@@ -51,7 +52,6 @@ internal static class Program
         );
         trades.Start();
 
-        // Run your scrape → price → post pipeline once
         await bot.RunAsync();
 
         Console.WriteLine("Bot running. Press ENTER to exit...");
@@ -77,4 +77,3 @@ internal static class Program
         return sb.ToString();
     }
 }
-
