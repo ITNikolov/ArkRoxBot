@@ -12,5 +12,7 @@ namespace ArkRoxBot.Interfaces
 
         // Allow other services to send messages back
         void SendMessage(string steamId64, string text);
+
+        Task StopAsync(TimeSpan? timeout = null);
     }
 }

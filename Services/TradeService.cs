@@ -19,7 +19,8 @@ namespace ArkRoxBot.Services
         private readonly string _apiKey;
         private readonly string _botSteamId64;
 
-        private readonly CancellationTokenSource _cts = new CancellationTokenSource();
+        private System.Threading.Timer? _timer;
+        private System.Threading.CancellationTokenSource? _cts;
         private Task? _loopTask;
 
         public TradeService(PriceStore priceStore,
@@ -34,24 +35,29 @@ namespace ArkRoxBot.Services
             _botSteamId64 = botSteamId64 ?? string.Empty;
         }
 
+        // in TradeService
+
+        private async Task PollAsync(CancellationToken ct)
+        {
+            if (ct.IsCancellationRequested) return;
+
+            // TODO: implement polling/validation/acceptance here.
+            // For now this is just a no-op so your timer compiles and runs cleanly.
+            // You can log something if you want:
+            // Console.WriteLine("[Trade] Poll tick…");
+
+            await Task.CompletedTask;
+        }
         public void Start()
         {
-            if (string.IsNullOrWhiteSpace(_apiKey))
-            {
-                Console.WriteLine("[Trade] No STEAM_WEB_API_KEY set. Trade poller disabled.");
-                return;
-            }
-            if (string.IsNullOrWhiteSpace(_botSteamId64))
-            {
-                Console.WriteLine("[Trade] No BOT_STEAMID64 set. Trade poller disabled.");
-                return;
-            }
+            if (_timer != null) return;
+            _cts = new System.Threading.CancellationTokenSource();
 
-            if (_loopTask != null)
-                return;
-
-            Console.WriteLine("[Trade] Starting read-only trade poller…");
-            _loopTask = Task.Run(RunLoopAsync);
+            // example: poll every 30s
+            _timer = new System.Threading.Timer(async _ =>
+            {
+                try { await PollAsync(_cts.Token); } catch { /* log if you like */ }
+            }, null, TimeSpan.Zero, TimeSpan.FromSeconds(30));
         }
 
         private async Task RunLoopAsync()
@@ -256,13 +262,53 @@ namespace ArkRoxBot.Services
             return string.Join(", ", parts);
         }
 
+        public void Stop()
+        {
+            // Atomically grab and clear the CTS (so Stop/Dispose can be called multiple times)
+            System.Threading.CancellationTokenSource? cts =
+                System.Threading.Interlocked.Exchange(ref _cts, null);
+
+            if (cts == null)
+            {
+                // Never started (or already stopped) — nothing to do
+                return;
+            }
+
+            try { cts.Cancel(); } catch { }
+
+            try
+            {
+                // If you use a timer-based poller
+                if (_timer != null)
+                {
+                    _timer.Change(System.Threading.Timeout.Infinite, System.Threading.Timeout.Infinite);
+                    _timer.Dispose();
+                    _timer = null;
+                }
+            }
+            catch { }
+
+            try
+            {
+                // If you use a loop task instead of a timer, wait briefly
+                _loopTask?.Wait(TimeSpan.FromSeconds(2));
+            }
+            catch { }
+
+            try { _http.CancelPendingRequests(); } catch { }
+
+            cts.Dispose();
+        }
+
         public void Dispose()
         {
-            _cts.Cancel();
-            try { _loopTask?.Wait(TimeSpan.FromSeconds(2)); } catch { }
+            // Safe even if Start() never ran
+            Stop();
+
+            // HttpClient is always created in ctor, so it’s safe to dispose
             _http.Dispose();
-            _cts.Dispose();
         }
+
 
         // --------- DTOs for GetTradeOffers ---------
 

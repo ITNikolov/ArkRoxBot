@@ -1,7 +1,4 @@
-﻿using System;
-using System.Threading.Tasks;
-using ArkRoxBot.CommandSystem;
-using ArkRoxBot.Interfaces;
+﻿using ArkRoxBot.Interfaces;
 using ArkRoxBot.Models;
 using ArkRoxBot.Services;
 using Microsoft.Extensions.DependencyInjection;
@@ -11,8 +8,8 @@ internal static class Program
 {
     public static async Task Main(string[] args)
     {
-        IHost host = Host.CreateDefaultBuilder(args)
-            .ConfigureServices((HostBuilderContext context, IServiceCollection services) =>
+        using IHost host = Host.CreateDefaultBuilder(args)
+            .ConfigureServices(services =>
             {
                 services.AddSingleton<CommandService>();
                 services.AddSingleton<IKeyPriceTracker, KeyPriceTracker>();
@@ -24,56 +21,22 @@ internal static class Program
                 services.AddSingleton<ItemConfigLoader>(_ => new ItemConfigLoader("Data/items.json"));
 
                 services.AddSingleton<ISteamClientService, SteamClientService>();
+                services.AddSingleton<TradeService>(sp =>
+                {
+                    var store = sp.GetRequiredService<PriceStore>();
+                    var items = sp.GetRequiredService<ItemConfigLoader>();
+
+                    var apiKey = "A6FEBC05BEAD8EAC88F2439A5E8B8741";
+                    var botId = "76561199466477276";
+
+                    return new TradeService(store, items, apiKey, botId);
+                });
                 services.AddSingleton<BotService>();
+
+                services.AddHostedService<BotApp>();
             })
             .Build();
 
-        ISteamClientService steam = host.Services.GetRequiredService<ISteamClientService>();
-        BotService bot = host.Services.GetRequiredService<BotService>();
-
-        Console.Write("Steam username: ");
-        string username = Console.ReadLine() ?? string.Empty;
-
-        string password = ReadMasked("Steam password: ");
-        string twoFactor = ReadMasked("Steam 2FA (if any): ");
-
-        // 🔹 Start Steam login/callback pump 
-        _ = steam.ConnectAndLoginAsync(username, password, twoFactor);
-
-        // Your temporary hard-coded Web API key + bot id (rotate + remove from git history!)
-        string apiKey = "A6FEBC05BEAD8EAC88F2439A5E8B8741";
-        string botId64 = "76561199466477276";
-
-        TradeService trades = new TradeService(
-            host.Services.GetRequiredService<PriceStore>(),
-            host.Services.GetRequiredService<ItemConfigLoader>(),
-            apiKey,
-            botId64
-        );
-        trades.Start();
-
-        await bot.RunAsync();
-
-        Console.WriteLine("Bot running. Press ENTER to exit...");
-        Console.ReadLine();
-    }
-
-    private static string ReadMasked(string prompt)
-    {
-        Console.Write(prompt);
-        var sb = new System.Text.StringBuilder();
-        ConsoleKeyInfo key;
-        while (true)
-        {
-            key = Console.ReadKey(intercept: true);
-            if (key.Key == ConsoleKey.Enter) { Console.WriteLine(); break; }
-            if (key.Key == ConsoleKey.Backspace)
-            {
-                if (sb.Length > 0) { sb.Length--; Console.Write("\b \b"); }
-                continue;
-            }
-            if (!char.IsControl(key.KeyChar)) { sb.Append(key.KeyChar); Console.Write("*"); }
-        }
-        return sb.ToString();
+        await host.RunAsync(); 
     }
 }

@@ -15,6 +15,13 @@ namespace ArkRoxBot.Services
         private readonly SteamUser _user;
         private readonly SteamFriends _friends;
 
+        // For Dispose of the app
+        private CancellationTokenSource? _pumpCts;
+        private Task? _pumpTask;
+        private readonly System.Threading.ManualResetEventSlim _loggedOffSignal = new(false);
+        private readonly System.Threading.ManualResetEventSlim _disconnectedSignal = new(false);
+
+
         // Bubble friend messages to bot logic
         public event Action<string, string>? OnFriendMessage;
 
@@ -51,24 +58,113 @@ namespace ArkRoxBot.Services
 
         }
 
-        public async Task ConnectAndLoginAsync(string username, string password, string? twoFactorCode = null)
+        public Task ConnectAndLoginAsync(string username, string password, string? twoFactor = null)
         {
-            _username = username;
-            _password = password;
-            _twoFactorCode = twoFactorCode;
+            _username = username ?? string.Empty;
+            _password = password ?? string.Empty;
+            _twoFactorCode = string.IsNullOrWhiteSpace(twoFactor) ? null : twoFactor.Trim();
+
+            // If already pumping, do nothing.
+            if (_pumpTask != null && !_pumpTask.IsCompleted)
+                return Task.CompletedTask;
+
+            // Reset shutdown signals for this session
+            _loggedOffSignal.Reset();
+            _disconnectedSignal.Reset();
 
             Console.WriteLine("Steam: Connecting…");
-            _shouldPumpCallbacks = true;
             _client.Connect();
 
-            await Task.Run(() =>
-            {
-                while (_shouldPumpCallbacks)
-                {
-                    _callbackManager.RunWaitCallbacks(TimeSpan.FromMilliseconds(100));
-                }
-            });
+            // Start token-based pump
+            _pumpCts?.Dispose();
+            _pumpCts = new CancellationTokenSource();
+            _pumpTask = Task.Run(() => PumpAsync(_pumpCts.Token));
+
+            return Task.CompletedTask;
         }
+
+
+
+        private async Task PumpAsync(CancellationToken token)
+        {
+            // Run Steam callbacks until cancelled.
+            while (!token.IsCancellationRequested)
+            {
+                // Run any pending callbacks; 1s wait keeps CPU low but responsive.
+                _callbackManager.RunWaitCallbacks(TimeSpan.FromSeconds(1));
+                await Task.Yield();
+            }
+        }
+
+
+        private void OnLoggedOff(SteamUser.LoggedOffCallback callback)
+        {
+            Console.WriteLine("Steam: Logged off → " + callback.Result);
+            _loggedOffSignal.Set();
+            _shouldPumpCallbacks = false;
+        }
+
+        private void OnDisconnected(SteamClient.DisconnectedCallback callback)
+        {
+            Console.WriteLine("Steam: Disconnected.");
+            _disconnectedSignal.Set();
+            _shouldPumpCallbacks = false;
+        }
+
+
+        public async Task StopAsync(TimeSpan? timeout = null)
+        {
+            TimeSpan wait = timeout ?? TimeSpan.FromSeconds(5);
+
+            Console.WriteLine("Steam: Shutting down…");
+
+            try
+            {
+                try { _friends.SetPersonaState(EPersonaState.Offline); } catch { }
+                try { _user.LogOff(); } catch { }
+
+                _loggedOffSignal.Wait(wait);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[SteamClientService] Stop: logoff wait error: " + ex.Message);
+            }
+
+            try
+            {
+                _client.Disconnect();
+                _disconnectedSignal.Wait(wait);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[SteamClientService] Stop: disconnect error: " + ex.Message);
+            }
+
+            try
+            {
+                if (_pumpCts != null) { _pumpCts.Cancel(); }
+                if (_pumpTask != null)
+                {
+                    Task completed = await Task.WhenAny(_pumpTask, Task.Delay(wait));
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[SteamClientService] Stop: pump cancel/wait error: " + ex.Message);
+            }
+            finally
+            {
+                if (_pumpCts != null) { _pumpCts.Dispose(); _pumpCts = null; }
+                _pumpTask = null;
+            }
+
+            Console.WriteLine("[SteamClientService] Stopped gracefully.");
+        }
+
+
+
+
+
 
         // -------------------------
         // Login (password + 2FA only)
@@ -98,12 +194,6 @@ namespace ArkRoxBot.Services
 
             Console.WriteLine("PersonaState: " + who.ConvertToUInt64() + " rel=" + rel);
 
-            if (rel == EFriendRelationship.RequestRecipient)
-            {
-                Console.WriteLine("Accepting friend request from " + who.ConvertToUInt64());
-                _friends.AddFriend(who);
-                // don’t greet here yet; wait for FriendAddedCallback so we’re definitely friends
-            }
         }
 
         // Fires after Steam accepts our AddFriend (or fails).
@@ -157,18 +247,7 @@ namespace ArkRoxBot.Services
             _shouldPumpCallbacks = false;
         }
 
-
-        private void OnLoggedOff(SteamUser.LoggedOffCallback callback)
-        {
-            Console.WriteLine("Steam: Logged off → " + callback.Result);
-            _shouldPumpCallbacks = false;
-        }
-
-        private void OnDisconnected(SteamClient.DisconnectedCallback callback)
-        {
-            Console.WriteLine("Steam: Disconnected.");
-            _shouldPumpCallbacks = false;
-        }
+ 
 
         // -----------------
         // Friends & chatting
@@ -286,5 +365,6 @@ namespace ArkRoxBot.Services
                 friendCount--;
             }
         }
+
     }
 }
