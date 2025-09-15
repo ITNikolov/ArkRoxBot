@@ -12,9 +12,13 @@ namespace ArkRoxBot.Services
     {
         private readonly ConcurrentDictionary<string, PriceResult> _prices = new();
 
+        private DateTime _lastUpdatedUtc = DateTime.MinValue;
+        public DateTime LastUpdatedUtc => _lastUpdatedUtc;
+
         public void SetPrice(string itemName, PriceResult result)
         {
             _prices[itemName.ToLower()] = result;
+            _lastUpdatedUtc = DateTime.UtcNow;
         }
 
         public PriceResult? GetPrice(string itemName)

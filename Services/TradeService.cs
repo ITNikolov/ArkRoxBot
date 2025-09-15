@@ -119,16 +119,39 @@ namespace ArkRoxBot.Services
 
             foreach (TradeOffer offer in parsed.response.trade_offers_received)
             {
-                // 2 = Active, 9 = Confirmation Needed (still treat as active), others skip for now
+                // 2 = Active, 9 = Confirmation Needed (treat as active)
                 if (offer.trade_offer_state != 2 && offer.trade_offer_state != 9)
                     continue;
 
+                // Partner SteamID64 as string (via your helper)
                 string partner64 = AccountIdToSteamId64(offer.accountid_other);
 
-                // Only consider offers to our account (received offers already are)
+                // Summarize TF2 items in the offer
                 OfferSummary summary = SummarizeOffer(offer, descIndex);
 
-                // Evaluate vs PriceStore + items.json
+                // --- Logging ---
+                Console.WriteLine("[Trade] Offer " + offer.tradeofferid + " from " + partner64);
+
+                if (summary.ItemsToReceiveByName.Count > 0)
+                {
+                    Console.WriteLine("  We RECEIVE:");
+                    foreach (KeyValuePair<string, int> kv in summary.ItemsToReceiveByName)
+                        Console.WriteLine("    + " + kv.Value.ToString(CultureInfo.InvariantCulture) + " × " + kv.Key);
+                }
+
+                if (summary.ItemsToGiveByName.Count > 0)
+                {
+                    Console.WriteLine("  We GIVE:");
+                    foreach (KeyValuePair<string, int> kv in summary.ItemsToGiveByName)
+                        Console.WriteLine("    - " + kv.Value.ToString(CultureInfo.InvariantCulture) + " × " + kv.Key);
+                }
+
+                if (summary.ItemsToReceiveByName.Count == 0 && summary.ItemsToGiveByName.Count == 0)
+                {
+                    Console.WriteLine("  (no TF2 items in this offer)");
+                }
+
+                // --- (Optional) rough value calc for logs only ---
                 decimal receiveValueRef = 0m;
                 foreach (KeyValuePair<string, int> kv in summary.ItemsToReceiveByName)
                 {
@@ -139,10 +162,6 @@ namespace ArkRoxBot.Services
                     if (_priceStore.TryGetPrice(name, out priced) && priced.MostCommonSellPrice > 0m)
                     {
                         receiveValueRef += priced.MostCommonSellPrice * count;
-                    }
-                    else
-                    {
-                        // unknown item -> treat as zero for safety
                     }
                 }
 
@@ -157,25 +176,22 @@ namespace ArkRoxBot.Services
                     {
                         giveValueRef += priced.MostCommonBuyPrice * count;
                     }
-                    else
-                    {
-                        // unknown -> zero
-                    }
                 }
 
-                // Simple decision: profitRef = what we can likely sell for - what we pay by our buy rules
                 decimal profitRef = receiveValueRef - giveValueRef;
 
-                Console.WriteLine("[Trade] Offer " + offer.tradeofferid +
-                                  " from " + partner64 +
-                                  " | recv=" + receiveValueRef.ToString("0.00") +
-                                  " ref, give=" + giveValueRef.ToString("0.00") +
-                                  " ref, profit=" + profitRef.ToString("0.00") + " ref");
+                Console.WriteLine(
+                    "[Trade] Offer " + offer.tradeofferid +
+                    " from " + partner64 +
+                    " | recv=" + receiveValueRef.ToString("0.00", CultureInfo.InvariantCulture) +
+                    " ref, give=" + giveValueRef.ToString("0.00", CultureInfo.InvariantCulture) +
+                    " ref, profit=" + profitRef.ToString("0.00", CultureInfo.InvariantCulture) + " ref"
+                );
 
                 Console.WriteLine("         +" + FormatDict(summary.ItemsToReceiveByName));
                 Console.WriteLine("         -" + FormatDict(summary.ItemsToGiveByName));
 
-                // For Step 2A we ONLY log. In Step 2B, we will accept/decline based on profitRef and config bounds.
+                // For now we ONLY log. Accept/decline logic comes later.
             }
         }
 
@@ -209,15 +225,21 @@ namespace ArkRoxBot.Services
                 foreach (Asset a in offer.items_to_receive)
                 {
                     if (a.appid != 440) continue; // TF2 only
+
                     string dkey = a.classid + "_" + a.instanceid;
                     string name = descIndex.TryGetValue(dkey, out Description d) && !string.IsNullOrEmpty(d.name)
                         ? d.name
                         : dkey;
 
                     int count = 1;
-                    int parsed;
-                    if (!string.IsNullOrEmpty(a.amount) && int.TryParse(a.amount, out parsed))
-                        count = parsed;
+                    if (!string.IsNullOrEmpty(a.amount))
+                    {
+                        int parsed;
+                        if (int.TryParse(a.amount, NumberStyles.Integer, CultureInfo.InvariantCulture, out parsed) && parsed > 0)
+                        {
+                            count = parsed;
+                        }
+                    }
 
                     if (!s.ItemsToReceiveByName.ContainsKey(name))
                         s.ItemsToReceiveByName[name] = 0;
@@ -231,15 +253,21 @@ namespace ArkRoxBot.Services
                 foreach (Asset a in offer.items_to_give)
                 {
                     if (a.appid != 440) continue;
+
                     string dkey = a.classid + "_" + a.instanceid;
                     string name = descIndex.TryGetValue(dkey, out Description d) && !string.IsNullOrEmpty(d.name)
                         ? d.name
                         : dkey;
 
                     int count = 1;
-                    int parsed;
-                    if (!string.IsNullOrEmpty(a.amount) && int.TryParse(a.amount, out parsed))
-                        count = parsed;
+                    if (!string.IsNullOrEmpty(a.amount))
+                    {
+                        int parsed;
+                        if (int.TryParse(a.amount, NumberStyles.Integer, CultureInfo.InvariantCulture, out parsed) && parsed > 0)
+                        {
+                            count = parsed;
+                        }
+                    }
 
                     if (!s.ItemsToGiveByName.ContainsKey(name))
                         s.ItemsToGiveByName[name] = 0;
@@ -251,14 +279,12 @@ namespace ArkRoxBot.Services
             return s;
         }
 
-        private static string FormatDict(Dictionary<string, int> map)
+        private static string FormatDict(Dictionary<string, int> d)
         {
-            if (map.Count == 0) return "(none)";
+            if (d.Count == 0) return "(none)";
             List<string> parts = new List<string>();
-            foreach (KeyValuePair<string, int> kv in map)
-            {
-                parts.Add(kv.Key + " x" + kv.Value.ToString(CultureInfo.InvariantCulture));
-            }
+            foreach (KeyValuePair<string, int> kv in d)
+                parts.Add(kv.Value.ToString(CultureInfo.InvariantCulture) + "× " + kv.Key);
             return string.Join(", ", parts);
         }
 
@@ -307,6 +333,33 @@ namespace ArkRoxBot.Services
 
             // HttpClient is always created in ctor, so it’s safe to dispose
             _http.Dispose();
+        }
+        private static void LogOfferSummary(string offerId, string partnerSteamId64, OfferSummary s)
+        {
+            Console.WriteLine("[Trade] Offer " + offerId + " from " + partnerSteamId64);
+
+            if (s.ItemsToReceiveByName.Count > 0)
+            {
+                Console.WriteLine("  We RECEIVE:");
+                foreach (KeyValuePair<string, int> kv in s.ItemsToReceiveByName)
+                {
+                    Console.WriteLine("    + " + kv.Value.ToString(CultureInfo.InvariantCulture) + " × " + kv.Key);
+                }
+            }
+
+            if (s.ItemsToGiveByName.Count > 0)
+            {
+                Console.WriteLine("  We GIVE:");
+                foreach (KeyValuePair<string, int> kv in s.ItemsToGiveByName)
+                {
+                    Console.WriteLine("    - " + kv.Value.ToString(CultureInfo.InvariantCulture) + " × " + kv.Key);
+                }
+            }
+
+            if (s.ItemsToReceiveByName.Count == 0 && s.ItemsToGiveByName.Count == 0)
+            {
+                Console.WriteLine("  (no TF2 items in this offer)");
+            }
         }
 
 

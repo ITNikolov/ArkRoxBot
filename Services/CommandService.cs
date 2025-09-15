@@ -2,16 +2,19 @@
 using System.Collections.Generic;
 using ArkRoxBot.Models;
 using ArkRoxBot.Services;
+using System.Globalization;
 
 namespace ArkRoxBot.Services
 {
     public sealed class CommandService
     {
         private readonly PriceStore _priceStore;
+        private readonly InventoryService _inventory;
 
-        public CommandService(PriceStore priceStore)
+        public CommandService(PriceStore priceStore, InventoryService inventory)
         {
             _priceStore = priceStore;
+            _inventory = inventory;
         }
 
         public string HandleCommand(string message)
@@ -40,9 +43,42 @@ namespace ArkRoxBot.Services
                 return "Owner: https://steamcommunity.com/id/yourprofile/"; // adjust
 
             if (text.Equals("!status", StringComparison.OrdinalIgnoreCase))
-                return "Online and pricing. Type !help for commands.";
+                return HandleStatus();
 
             return string.Empty;
+        }
+
+        private string HandleStatus()
+        {
+            try
+            {
+                // Inventory snapshot (full-frame TF2: keys + metal)
+                InventorySnapshot snap = _inventory.GetSnapshotAsync().GetAwaiter().GetResult();
+
+                // Priced items currently in the store
+                IReadOnlyDictionary<string, PriceResult> all = _priceStore.GetAllPrices();
+                int pricedCount = all.Count;
+
+                // Last price refresh timestamp
+                string last =
+                    _priceStore.LastUpdatedUtc == DateTime.MinValue
+                        ? "n/a"
+                        : _priceStore.LastUpdatedUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
+
+                // Compact, readable summary
+                return
+                    "Stock — Keys: " + snap.Keys.ToString(CultureInfo.InvariantCulture) +
+                    " | Refined: " + snap.Refined.ToString(CultureInfo.InvariantCulture) +
+                    " (Recl: " + snap.Reclaimed.ToString(CultureInfo.InvariantCulture) +
+                    ", Scrap: " + snap.Scrap.ToString(CultureInfo.InvariantCulture) + ")" +
+                    " | Priced items: " + pricedCount.ToString(CultureInfo.InvariantCulture) +
+                    " | Last price refresh: " + last;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[CommandService:!status] " + ex.Message);
+                return "Status unavailable right now.";
+            }
         }
 
         private string HandlePrice(string item)

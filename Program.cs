@@ -31,9 +31,15 @@ internal static class Program
 
                     return new TradeService(store, items, apiKey, botId);
                 });
+                services.AddSingleton<InventoryService>(sp =>
+                {
+                    var botId = "76561199466477276"; // same as TradeService
+                    return new InventoryService(botId);
+                });
                 services.AddSingleton<BotService>();
 
                 services.AddHostedService<BotApp>();
+
             })
             .Build();
 
