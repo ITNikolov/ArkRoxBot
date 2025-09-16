@@ -16,6 +16,7 @@ namespace ArkRoxBot.Services
             _priceParser = priceParser;
         }
 
+
         public PriceResult Calculate(string itemName, List<ListingData> listings)
         {
             List<decimal> buyPrices = new List<decimal>();
@@ -23,9 +24,10 @@ namespace ArkRoxBot.Services
 
             foreach (ListingData listing in listings)
             {
-                if (!_priceParser.TryParseToRefined(listing.Price, out decimal refinedPrice))
+                decimal refinedPrice;
+                if (!_priceParser.TryParseToRefined(listing.Price, out refinedPrice))
                 {
-                    Console.WriteLine($"Could not parse listing price: '{listing.Price}'");
+                    Console.WriteLine("Could not parse listing price: '" + listing.Price + "'");
                     continue;
                 }
 
@@ -39,10 +41,24 @@ namespace ArkRoxBot.Services
                 }
             }
 
-            Console.WriteLine($"Parsed → Buy: {buyPrices.Count}, Sell: {sellPrices.Count}");
+            Console.WriteLine("Parsed → Buy: " + buyPrices.Count.ToString() + ", Sell: " + sellPrices.Count.ToString());
 
-            decimal buyPrice = GetSmartPrice(buyPrices, "BUY");
+            // 1) Determine SELL first (unchanged logic inside GetSmartPrice)
             decimal sellPrice = GetSmartPrice(sellPrices, "SELL");
+
+            // 2) Determine BUY only from listings BELOW the chosen SELL
+            decimal buyPrice;
+            if (sellPrice <= 0m)
+            {
+                // No reliable SELL → skip BUY to avoid overpaying
+                Console.WriteLine("SELL unavailable → disabling BUY for safety.");
+                buyPrice = 0m;
+            }
+            else
+            {
+                // BUY window is capped at SELL inside GetSmartPrice
+                buyPrice = GetSmartPrice(buyPrices, "BUY", sellPrice);
+            }
 
             return new PriceResult
             {
@@ -52,7 +68,8 @@ namespace ArkRoxBot.Services
             };
         }
 
-        private decimal GetSmartPrice(List<decimal> prices, string label)
+
+        private decimal GetSmartPrice(List<decimal> prices, string label, decimal? sellAnchor = null)
         {
             if (prices.Count < 5)
             {
@@ -83,32 +100,43 @@ namespace ArkRoxBot.Services
             decimal median = trimmed[trimmed.Count / 2];
             Console.WriteLine(label + " median (after trim): " + median.ToString("0.00") + " ref");
 
-            // ---- Dynamic window (BUY only): 15% → 20%----
+            // ---- Window selection (unchanged), with BUY capped under SELL anchor ----
             decimal[] windows = (label == "BUY")
-                ? new decimal[] { 0.15m, 0.20m,}
+                ? new decimal[] { 0.15m, 0.20m }
                 : new decimal[] { 0.15m };
 
             List<decimal> pocket = new List<decimal>();
             bool pocketOk = false;
+
+            if (label == "BUY" && sellAnchor.HasValue && sellAnchor.Value > 0m)
+            {
+                Console.WriteLine("BUY anchor: cap max price at SELL = " + sellAnchor.Value.ToString("0.00") + " ref");
+            }
 
             foreach (decimal w in windows)
             {
                 decimal min = median * (1m - w);
                 decimal max = median * (1m + w);
 
+                // NEW: if BUY is anchored, do not consider prices above SELL
+                if (label == "BUY" && sellAnchor.HasValue && sellAnchor.Value > 0m && max > sellAnchor.Value)
+                {
+                    max = sellAnchor.Value;
+                }
+
                 pocket = trimmed.Where(p => p >= min && p <= max).ToList();
 
                 if (pocket.Count >= 3)
                 {
                     if (label == "BUY")
-                        Console.WriteLine("BUY: using ±" + (w * 100m).ToString("0") + "% window with " + pocket.Count + " inliers.");
+                        Console.WriteLine("BUY: using [" + min.ToString("0.00") + ", " + max.ToString("0.00") + "] with " + pocket.Count + " inliers.");
                     pocketOk = true;
                     break;
                 }
                 else
                 {
                     if (label == "BUY")
-                        Console.WriteLine("BUY: ±" + (w * 100m).ToString("0") + "% → " + pocket.Count + " inliers (need 3).");
+                        Console.WriteLine("BUY: window ±" + (w * 100m).ToString("0") + "% → " + pocket.Count + " inliers (need 3).");
                 }
             }
 
@@ -154,7 +182,6 @@ namespace ArkRoxBot.Services
             Console.WriteLine("Final " + label + " Price: " + bestPrice + " ref");
             return bestPrice;
         }
-
 
     }
 }
