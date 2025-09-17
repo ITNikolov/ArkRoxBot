@@ -18,6 +18,8 @@ namespace ArkRoxBot.Services
         private readonly ItemConfigLoader _configLoader;
         private readonly string _apiKey;
         private readonly string _botSteamId64;
+        private readonly OfferEvaluator _evaluator;
+
 
         private System.Threading.Timer? _timer;
         private System.Threading.CancellationTokenSource? _cts;
@@ -26,13 +28,15 @@ namespace ArkRoxBot.Services
         public TradeService(PriceStore priceStore,
                             ItemConfigLoader configLoader,
                             string apiKey,
-                            string botSteamId64)
+                            string botSteamId64,
+                            OfferEvaluator evaluator)
         {
             _http = new HttpClient();
             _priceStore = priceStore;
             _configLoader = configLoader;
             _apiKey = apiKey ?? string.Empty;
             _botSteamId64 = botSteamId64 ?? string.Empty;
+            _evaluator = evaluator;
         }
 
         // in TradeService

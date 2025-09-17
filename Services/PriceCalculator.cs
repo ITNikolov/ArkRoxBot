@@ -4,6 +4,7 @@ using ArkRoxBot.Models;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Security.Cryptography;
 
 namespace ArkRoxBot.Services
 {
@@ -96,9 +97,20 @@ namespace ArkRoxBot.Services
                 trimmed = sorted;
             }
 
-            // median (keep your original style)
+            if (label == "BUY" && sellAnchor.HasValue && sellAnchor.Value > 0m)
+            {
+                List<decimal> belowSell = trimmed.Where(p => p <= sellAnchor.Value).ToList();
+                if (belowSell.Count < 3)
+                {
+                    Console.WriteLine("BUY: fewer than 3 prices ≤ SELL (" + sellAnchor.Value.ToString("0.00") + "). Skipping.");
+                    return 0;
+                }
+                trimmed = belowSell;
+            }
+
             decimal median = trimmed[trimmed.Count / 2];
             Console.WriteLine(label + " median (after trim): " + median.ToString("0.00") + " ref");
+
 
             // ---- Window selection (unchanged), with BUY capped under SELL anchor ----
             decimal[] windows = (label == "BUY")

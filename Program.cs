@@ -23,20 +23,23 @@ internal static class Program
                 services.AddSingleton<ISteamClientService, SteamClientService>();
                 services.AddSingleton<TradeService>(sp =>
                 {
-                    var store = sp.GetRequiredService<PriceStore>();
-                    var items = sp.GetRequiredService<ItemConfigLoader>();
+                    PriceStore store = sp.GetRequiredService<PriceStore>();
+                    ItemConfigLoader items = sp.GetRequiredService<ItemConfigLoader>();
+                    OfferEvaluator evaluator = sp.GetRequiredService<OfferEvaluator>();
 
-                    var apiKey = "A6FEBC05BEAD8EAC88F2439A5E8B8741";
-                    var botId = "76561199466477276";
+                    string apiKey = "A6FEBC05BEAD8EAC88F2439A5E8B8741";
+                    string botId = "76561199466477276";
 
-                    return new TradeService(store, items, apiKey, botId);
+                    return new TradeService(store, items, apiKey, botId, evaluator);
                 });
+
                 services.AddSingleton<InventoryService>(sp =>
                 {
                     var botId = "76561199466477276"; // same as TradeService
                     return new InventoryService(botId);
                 });
                 services.AddSingleton<BotService>();
+
 
                 services.AddHostedService<BotApp>();
 
