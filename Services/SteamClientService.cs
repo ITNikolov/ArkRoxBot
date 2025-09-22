@@ -4,6 +4,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using SteamKit2;
 using ArkRoxBot.Interfaces;
+using SteamKit2.Internal;
 
 namespace ArkRoxBot.Services
 {
@@ -94,6 +95,17 @@ namespace ArkRoxBot.Services
                 _callbackManager.RunWaitCallbacks(TimeSpan.FromSeconds(1));
                 await Task.Yield();
             }
+        }
+
+        public void Disconnect()
+        {
+            try
+            {   
+                
+                _user.LogOff();
+                _client.Disconnect();
+            }
+            catch { }
         }
 
 

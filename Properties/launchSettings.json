@@ -1,0 +1,13 @@
+﻿{
+  "profiles": {
+    "ArkRoxBot": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "TRADING_ENABLED": "true",
+        "DRY_RUN": "false",
+        "VERIFY_SELL_ASSETS": "true",
+        "SELL_TOL_REF": "0.02"
+      }
+    }
+  }
+}

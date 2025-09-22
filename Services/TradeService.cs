@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
@@ -13,17 +14,27 @@ namespace ArkRoxBot.Services
 {
     public sealed class TradeService : IDisposable
     {
+        private readonly OfferEvaluator _evaluator;
+        private readonly bool _tradingEnabled;
+        private readonly bool _dryRun;
         private readonly HttpClient _http;
         private readonly PriceStore _priceStore;
         private readonly ItemConfigLoader _configLoader;
         private readonly string _apiKey;
         private readonly string _botSteamId64;
-        private readonly OfferEvaluator _evaluator;
+        private readonly bool _verifySellAssets;
 
 
         private System.Threading.Timer? _timer;
         private System.Threading.CancellationTokenSource? _cts;
         private Task? _loopTask;
+        private int _isPolling = 0;
+        private const decimal AcceptToleranceRef = 0.02m; // was 0.01m
+
+
+        // simple cache for inventory pure snapshot (reduce calls)
+        private PureSnapshot? _pureCache;
+        private DateTime _pureCacheUtc;
 
         public TradeService(PriceStore priceStore,
                             ItemConfigLoader configLoader,
@@ -37,57 +48,147 @@ namespace ArkRoxBot.Services
             _apiKey = apiKey ?? string.Empty;
             _botSteamId64 = botSteamId64 ?? string.Empty;
             _evaluator = evaluator;
+
+            // Helpful UAs for Steam community endpoints
+            _http.DefaultRequestHeaders.UserAgent.ParseAdd(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36");
+            _http.DefaultRequestHeaders.UserAgent.ParseAdd("ArkRoxBot/1.0 (+https://example)");
+
+            _tradingEnabled = string.Equals(
+                Environment.GetEnvironmentVariable("TRADING_ENABLED"),
+                "true",
+                StringComparison.OrdinalIgnoreCase);
+
+            _dryRun = !string.Equals(
+                Environment.GetEnvironmentVariable("DRY_RUN"),
+                "false",
+                StringComparison.OrdinalIgnoreCase);
+
+            _verifySellAssets = !string.Equals(
+                Environment.GetEnvironmentVariable("VERIFY_SELL_ASSETS"),
+                "false",
+                StringComparison.OrdinalIgnoreCase);
+
+            Console.WriteLine("[Trade] Flags → TRADING_ENABLED=" + _tradingEnabled +
+                              ", DRY_RUN=" + _dryRun +
+                              ", VERIFY_SELL_ASSETS=" + _verifySellAssets);
         }
 
-        // in TradeService
 
-        private async Task PollAsync(CancellationToken ct)
-        {
-            if (ct.IsCancellationRequested) return;
-
-            // TODO: implement polling/validation/acceptance here.
-            // For now this is just a no-op so your timer compiles and runs cleanly.
-            // You can log something if you want:
-            // Console.WriteLine("[Trade] Poll tick…");
-
-            await Task.CompletedTask;
-        }
         public void Start()
         {
             if (_timer != null) return;
             _cts = new System.Threading.CancellationTokenSource();
 
-            // example: poll every 30s
             _timer = new System.Threading.Timer(async _ =>
             {
-                try { await PollAsync(_cts.Token); } catch { /* log if you like */ }
+                try { await PollAsync(_cts.Token); }
+                catch (Exception ex) { Console.WriteLine("[Trade] Timer poll error: " + ex.Message); }
             }, null, TimeSpan.Zero, TimeSpan.FromSeconds(30));
         }
 
-        private async Task RunLoopAsync()
+        private async Task PollAsync(CancellationToken ct)
         {
-            // poll every 30 seconds
-            while (!_cts.IsCancellationRequested)
+            if (ct.IsCancellationRequested) return;
+
+            if (System.Threading.Interlocked.Exchange(ref _isPolling, 1) == 1)
+                return;
+
+            try
+            {
+                await PollOnceAsync();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[Trade] Poll error: " + ex.Message);
+            }
+            finally
+            {
+                System.Threading.Volatile.Write(ref _isPolling, 0);
+            }
+        }
+
+        // Call this once after Start() to print a snapshot to the console.
+        public Task LogStockSnapshotOnceAsync()
+        {
+            return LogStockSnapshotAsync();
+        }
+
+        private async Task LogStockSnapshotAsync()
+        {
+            try
+            {
+                // Pure snapshot
+                PureSnapshot pure = await GetPureSnapshotAsync();
+                Console.WriteLine("[Stock] Pure → Keys=" + pure.Keys + ", Ref=" + pure.Refined +
+                                  ", Rec=" + pure.Reclaimed + ", Scrap=" + pure.Scrap);
+
+                // Tracked sell items snapshot
+                ConfigRoot cfg = _configLoader.LoadItems();
+
+                // normalize targets ("The Team Captain" → "Team Captain")
+                HashSet<string> names = new HashSet<string>(
+                    cfg.SellConfig.Select(s => StripLeadingThe(s.Name)),
+                    NameCmp
+                );
+
+                Dictionary<string, int> have = await GetCountsForNamesAsync(names);
+                foreach (KeyValuePair<string, int> kv in have.OrderBy(k => k.Key))
+                    Console.WriteLine("[Stock] " + kv.Key + ": " + kv.Value);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[Stock] Snapshot failed: " + ex.Message);
+            }
+        }
+
+        private async Task<string?> GetInventoryJsonAsync()
+        {
+            string url = "https://steamcommunity.com/inventory/" + _botSteamId64 + "/440/2?l=english&count=5000";
+
+            for (int attempt = 1; attempt <= 3; attempt++)
             {
                 try
                 {
-                    await PollOnceAsync();
+                    HttpRequestMessage req = new HttpRequestMessage(HttpMethod.Get, url);
+                    HttpResponseMessage resp = await _http.SendAsync(req);
+
+                    if (resp.IsSuccessStatusCode)
+                    {
+                        string text = await resp.Content.ReadAsStringAsync();
+                        return text;
+                    }
+
+                    int code = (int)resp.StatusCode;
+
+                    // transient errors – back off and retry
+                    if (code == 400 || code == 429 || code >= 500)
+                    {
+                        await Task.Delay(TimeSpan.FromMilliseconds(400 * attempt));
+                        continue;
+                    }
+
+                    Console.WriteLine("[Inv] HTTP " + code.ToString(CultureInfo.InvariantCulture) + " fetching inventory.");
+                    return null;
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine("[Trade] Poll error: " + ex.Message);
-                }
-
-                try
-                {
-                    await Task.Delay(TimeSpan.FromSeconds(30), _cts.Token);
-                }
-                catch (TaskCanceledException)
-                {
-                    // shutdown
+                    Console.WriteLine("[Inv] Fetch error (try " + attempt.ToString(CultureInfo.InvariantCulture) + "): " + ex.Message);
+                    await Task.Delay(TimeSpan.FromMilliseconds(400 * attempt));
                 }
             }
+
+            return null;
         }
+
+
+
+        private static string Canon(string s)
+        {
+            if (string.IsNullOrWhiteSpace(s)) return string.Empty;
+            return StripLeadingThe(s).Trim();
+        }
+
 
         private async Task PollOnceAsync()
         {
@@ -113,95 +214,536 @@ namespace ArkRoxBot.Services
             }
 
             Dictionary<string, Description> descIndex = BuildDescriptionIndex(parsed.response.descriptions);
-
             if (parsed.response.trade_offers_received == null)
-            {
                 return;
-            }
 
             ConfigRoot cfg = _configLoader.LoadItems();
 
             foreach (TradeOffer offer in parsed.response.trade_offers_received)
             {
-                // 2 = Active, 9 = Confirmation Needed (treat as active)
+                // 2 = Active, 9 = Confirmation Needed (skip actions on 9 for now)
                 if (offer.trade_offer_state != 2 && offer.trade_offer_state != 9)
                     continue;
 
-                // Partner SteamID64 as string (via your helper)
                 string partner64 = AccountIdToSteamId64(offer.accountid_other);
-
-                // Summarize TF2 items in the offer
                 OfferSummary summary = SummarizeOffer(offer, descIndex);
 
-                // --- Logging ---
-                Console.WriteLine("[Trade] Offer " + offer.tradeofferid + " from " + partner64);
+                LogOfferSummary(offer.tradeofferid, partner64, summary);
 
-                if (summary.ItemsToReceiveByName.Count > 0)
+                if (offer.trade_offer_state == 9)
                 {
-                    Console.WriteLine("  We RECEIVE:");
-                    foreach (KeyValuePair<string, int> kv in summary.ItemsToReceiveByName)
-                        Console.WriteLine("    + " + kv.Value.ToString(CultureInfo.InvariantCulture) + " × " + kv.Key);
+                    Console.WriteLine("[Trade] Offer " + offer.tradeofferid + " needs confirmation → skipping for now.");
+                    continue;
                 }
 
-                if (summary.ItemsToGiveByName.Count > 0)
+                // ---- Basic policy (tracked items, etc.)
+                string policyReason;
+                bool policyOk = CheckBasicPolicy(summary, cfg, out policyReason);
+                if (!policyOk)
                 {
-                    Console.WriteLine("  We GIVE:");
+                    Console.WriteLine("[Policy] Decline: " + policyReason);
+                    if (!_tradingEnabled || _dryRun)
+                    {
+                        Console.WriteLine("[Trade] DRY-RUN: would Decline offer " + offer.tradeofferid + " (" + policyReason + ")");
+                    }
+                    else
+                    {
+                        try { await DeclineOfferAsync(offer.tradeofferid); } catch (Exception ex) { Console.WriteLine("[Trade] Decline error: " + ex.Message); }
+                    }
+                    continue;
+                }
+
+
+
+                // ---- Decide direction
+                bool givesNonPure = summary.ItemsToGiveByName.Keys.Any(n => !IsPureName(n));
+                bool receivesOnlyPure = OnlyPure(summary.ItemsToReceiveByName);
+
+                bool receivesNonPure = summary.ItemsToReceiveByName.Keys.Any(n => !IsPureName(n));
+                bool givesOnlyPure = OnlyPure(summary.ItemsToGiveByName);
+
+                // ==========================
+                // SELL: we GIVE item(s), partner pays PURE
+                // ==========================
+                if (givesNonPure && receivesOnlyPure)
+                {
+                    // Optional: ensure we still own the exact assets we are giving
+                    if (_verifySellAssets)
+                    {
+                        (bool Ok, string Reason) sellAssetsCheck = await CheckSellAssetsAvailableAsync(offer.items_to_give);
+                        if (!sellAssetsCheck.Ok)
+                        {
+                            Console.WriteLine("[Policy] Decline (sell assets): " + sellAssetsCheck.Reason);
+                            if (!_tradingEnabled || _dryRun)
+                            {
+                                Console.WriteLine("[Trade] DRY-RUN: would Decline offer " + offer.tradeofferid + " (sell assets)");
+                            }
+                            else
+                            {
+                                try { await DeclineOfferAsync(offer.tradeofferid); } catch (Exception ex) { Console.WriteLine("[Trade] Decline error: " + ex.Message); }
+                            }
+                            continue;
+                        }
+                    }
+
+                    // Required ref based on SELL price * qty
+                    decimal requiredRef = 0m;
                     foreach (KeyValuePair<string, int> kv in summary.ItemsToGiveByName)
-                        Console.WriteLine("    - " + kv.Value.ToString(CultureInfo.InvariantCulture) + " × " + kv.Key);
-                }
-
-                if (summary.ItemsToReceiveByName.Count == 0 && summary.ItemsToGiveByName.Count == 0)
-                {
-                    Console.WriteLine("  (no TF2 items in this offer)");
-                }
-
-                // --- (Optional) rough value calc for logs only ---
-                decimal receiveValueRef = 0m;
-                foreach (KeyValuePair<string, int> kv in summary.ItemsToReceiveByName)
-                {
-                    string name = kv.Key;
-                    int count = kv.Value;
-
-                    PriceResult priced;
-                    if (_priceStore.TryGetPrice(name, out priced) && priced.MostCommonSellPrice > 0m)
                     {
-                        receiveValueRef += priced.MostCommonSellPrice * count;
+                        string name = kv.Key;
+                        int quantity = kv.Value;
+                        if (IsPureName(name)) continue;
+
+                        PriceResult price;
+                        if (!_priceStore.TryGetPrice(name, out price) || price.MostCommonSellPrice <= 0m)
+                        {
+                            Console.WriteLine("[Policy] Decline: missing SELL price for " + name);
+                            if (!_tradingEnabled || _dryRun)
+                                Console.WriteLine("[Trade] DRY-RUN: would Decline offer " + offer.tradeofferid + " (missing SELL price)");
+                            else
+                                try { await DeclineOfferAsync(offer.tradeofferid); } catch (Exception ex) { Console.WriteLine("[Trade] Decline error: " + ex.Message); }
+                            goto NextOffer;
+                        }
+
+                        requiredRef += price.MostCommonSellPrice * quantity;
+                    }
+
+                    // Offered pure (keys→ref + metal)
+                    decimal offeredRef = RefFromPure(summary.ItemsToReceiveByName, GetKeyRefPrice());
+
+                    if (offeredRef + AcceptToleranceRef >= requiredRef)
+                    {
+                        Console.WriteLine("[Eval] SELL ok | offered=" + offeredRef.ToString("0.00", CultureInfo.InvariantCulture) +
+                                          " ref | required=" + requiredRef.ToString("0.00", CultureInfo.InvariantCulture) + " ref");
+
+                        if (!_tradingEnabled || _dryRun)
+                        {
+                            Console.WriteLine("[Trade] DRY-RUN: would Accept offer " + offer.tradeofferid + " (sell)");
+                        }
+                        else
+                        {
+                            try { await AcceptOfferAsync(offer.tradeofferid, partner64); }
+                            catch (Exception ex) { Console.WriteLine("[Trade] Accept error: " + ex.Message); }
+                        }
+                    }
+                    else
+                    {
+                        Console.WriteLine("[Policy] Decline: offered " + offeredRef.ToString("0.00", CultureInfo.InvariantCulture) +
+                                          " ref < required SELL " + requiredRef.ToString("0.00", CultureInfo.InvariantCulture) + " ref");
+                        if (!_tradingEnabled || _dryRun)
+                            Console.WriteLine("[Trade] DRY-RUN: would Decline offer " + offer.tradeofferid + " (underpay)");
+                        else
+                            try { await DeclineOfferAsync(offer.tradeofferid); } catch (Exception ex) { Console.WriteLine("[Trade] Decline error: " + ex.Message); }
+                    }
+
+                    goto NextOffer;
+                }
+
+                // ==========================
+                // BUY: we RECEIVE non-pure, we GIVE PURE
+                // ==========================
+                if (receivesNonPure && givesOnlyPure)
+                {
+                    // Stock caps
+                    (bool Ok, string Reason) capCheck = await CheckStockCapsAsync(summary, cfg);
+                    if (!capCheck.Ok)
+                    {
+                        Console.WriteLine("[Policy] Decline (stock cap): " + capCheck.Reason);
+                        if (!_tradingEnabled || _dryRun)
+                        {
+                            Console.WriteLine("[Trade] DRY-RUN: would Decline offer " + offer.tradeofferid + " (" + capCheck.Reason + ")");
+                        }
+                        else
+                        {
+                            try { await DeclineOfferAsync(offer.tradeofferid); } catch (Exception ex) { Console.WriteLine("[Trade] Decline error: " + ex.Message); }
+                        }
+                        goto NextOffer;
+                    }
+
+                    // Ensure we have pure to give
+                    (bool Ok, string Reason) pureCheck = await CheckPureBalanceAsync(summary);
+                    if (!pureCheck.Ok)
+                    {
+                        Console.WriteLine("[Policy] Decline (pure): " + pureCheck.Reason);
+                        if (!_tradingEnabled || _dryRun)
+                        {
+                            Console.WriteLine("[Trade] DRY-RUN: would Decline offer " + offer.tradeofferid + " (" + pureCheck.Reason + ")");
+                        }
+                        else
+                        {
+                            try { await DeclineOfferAsync(offer.tradeofferid); } catch (Exception ex) { Console.WriteLine("[Trade] Decline error: " + ex.Message); }
+                        }
+                        goto NextOffer;
+                    }
+
+                    // Evaluator decides
+                    OfferEvaluationResult ev = _evaluator.Evaluate(summary);
+                    Console.WriteLine(
+                        "[Eval] " + ev.Decision.ToString() +
+                        " | recv=" + ev.ReceiveRef.ToString("0.00", CultureInfo.InvariantCulture) +
+                        " | give=" + ev.GiveRef.ToString("0.00", CultureInfo.InvariantCulture) +
+                        " | profit=" + ev.ProfitRef.ToString("0.00", CultureInfo.InvariantCulture) +
+                        " | reason=" + ev.Reason
+                    );
+
+                    if (!_tradingEnabled || _dryRun)
+                    {
+                        Console.WriteLine("[Trade] DRY-RUN: would " + ev.Decision.ToString() + " offer " + offer.tradeofferid + " (" + ev.Reason + ")");
+                    }
+                    else
+                    {
+                        try
+                        {
+                            if (ev.Decision == OfferDecision.Accept)
+                                await AcceptOfferAsync(offer.tradeofferid, partner64);
+                            else
+                                await DeclineOfferAsync(offer.tradeofferid);
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine("[Trade] Action error for " + offer.tradeofferid + ": " + ex.Message);
+                        }
+                    }
+
+                    goto NextOffer;
+                }
+
+                // Mixed or unsupported (both sides contain non-pure, etc.)
+                {
+                    string why = "unsupported composition (mixed non-pure on both sides)";
+                    Console.WriteLine("[Policy] Decline: " + why);
+                    if (!_tradingEnabled || _dryRun)
+                    {
+                        Console.WriteLine("[Trade] DRY-RUN: would Decline offer " + offer.tradeofferid + " (" + why + ")");
+                    }
+                    else
+                    {
+                        try { await DeclineOfferAsync(offer.tradeofferid); } catch (Exception ex) { Console.WriteLine("[Trade] Decline error: " + ex.Message); }
                     }
                 }
 
-                decimal giveValueRef = 0m;
-                foreach (KeyValuePair<string, int> kv in summary.ItemsToGiveByName)
-                {
-                    string name = kv.Key;
-                    int count = kv.Value;
-
-                    PriceResult priced;
-                    if (_priceStore.TryGetPrice(name, out priced) && priced.MostCommonBuyPrice > 0m)
-                    {
-                        giveValueRef += priced.MostCommonBuyPrice * count;
-                    }
-                }
-
-                decimal profitRef = receiveValueRef - giveValueRef;
-
-                Console.WriteLine(
-                    "[Trade] Offer " + offer.tradeofferid +
-                    " from " + partner64 +
-                    " | recv=" + receiveValueRef.ToString("0.00", CultureInfo.InvariantCulture) +
-                    " ref, give=" + giveValueRef.ToString("0.00", CultureInfo.InvariantCulture) +
-                    " ref, profit=" + profitRef.ToString("0.00", CultureInfo.InvariantCulture) + " ref"
-                );
-
-                Console.WriteLine("         +" + FormatDict(summary.ItemsToReceiveByName));
-                Console.WriteLine("         -" + FormatDict(summary.ItemsToGiveByName));
-
-                // For now we ONLY log. Accept/decline logic comes later.
+            NextOffer:
+                continue;
             }
         }
+        private async Task<HashSet<string>> GetLiveAssetIdsAsync()
+        {
+            var api = await TryGetAssetIdsViaWebApiAsync();
+            if (api != null && api.Count > 0) return api;
+
+            var inv = await FetchCommunityInventoryAsync();
+            if (inv?.assets == null) return new HashSet<string>(StringComparer.Ordinal);
+
+            var ids = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var a in inv.assets)
+                if (!string.IsNullOrEmpty(a.assetid))
+                    ids.Add(a.assetid);
+
+            return ids;
+        }
+
+
+        private async Task<(bool Ok, string Reason)> CheckSellAssetsAvailableAsync(List<Asset>? itemsToGive)
+        {
+            if (itemsToGive == null || itemsToGive.Count == 0)
+                return (true, string.Empty);
+
+            HashSet<string> have = await GetLiveAssetIdsAsync();
+            if (have.Count == 0)
+                return (false, "inventory unavailable (private/rate-limited)");
+
+            foreach (Asset a in itemsToGive)
+            {
+                if (a.appid != 440) continue;
+                if (string.IsNullOrEmpty(a.assetid))
+                    return (false, "missing asset id in offer");
+                if (!have.Contains(a.assetid))
+                    return (false, "we no longer own asset " + a.assetid);
+            }
+            return (true, string.Empty);
+        }
+
+
+
+        // ---------- Policy helpers ----------
+
+        private static readonly StringComparer NameCmp = StringComparer.OrdinalIgnoreCase;
+
+        private static bool IsPureName(string name)
+        {
+            return
+                NameCmp.Equals(name, "Refined Metal") ||
+                NameCmp.Equals(name, "Reclaimed Metal") ||
+                NameCmp.Equals(name, "Scrap Metal") ||
+                NameCmp.Equals(name, "Mann Co. Supply Crate Key");
+        }
+
+        // TradeService.cs  (replace the whole method with this)
+        private static bool CheckBasicPolicy(OfferSummary summary, ConfigRoot cfg, out string reason)
+        {
+            // Build allowed-name sets from config, with both raw and normalized forms
+            HashSet<string> buyAllowed = new HashSet<string>(NameCmp);
+            foreach (BuyConfig b in cfg.BuyConfig)
+            {
+                if (b == null || string.IsNullOrWhiteSpace(b.Name)) continue;
+                string raw = b.Name.Trim();
+                buyAllowed.Add(raw);
+                buyAllowed.Add(StripLeadingThe(raw)); // normalized
+            }
+
+            HashSet<string> sellAllowed = new HashSet<string>(NameCmp);
+            foreach (SellConfig s in cfg.SellConfig)
+            {
+                if (s == null || string.IsNullOrWhiteSpace(s.Name)) continue;
+                string raw = s.Name.Trim();
+                sellAllowed.Add(raw);
+                sellAllowed.Add(StripLeadingThe(raw)); // normalized
+            }
+
+            // If we RECEIVE non-pure (we are buying), it must be in BuyConfig
+            foreach (KeyValuePair<string, int> kv in summary.ItemsToReceiveByName)
+            {
+                string name = kv.Key;
+                if (!IsPureName(name) && !buyAllowed.Contains(name))
+                {
+                    reason = "not a tracked buy item: " + name;
+                    return false;
+                }
+            }
+
+            // If we GIVE non-pure (we are selling), it must be in SellConfig
+            foreach (KeyValuePair<string, int> kv in summary.ItemsToGiveByName)
+            {
+                string name = kv.Key;
+                if (!IsPureName(name) && !sellAllowed.Contains(name))
+                {
+                    reason = "not a tracked sell item: " + name;
+                    return false;
+                }
+            }
+
+            reason = string.Empty;
+            return true;
+        }
+
+        private decimal GetKeyRefPrice()
+        {
+            PriceResult key;
+            if (_priceStore.TryGetPrice("mann co. supply crate key", out key) && key.MostCommonSellPrice > 0m)
+                return key.MostCommonSellPrice;
+
+            // Very safe fallback if keys haven’t been priced yet
+            return 56.00m;
+        }
+
+        private static decimal RefFromPure(Dictionary<string, int> byName, decimal keyRefPrice)
+        {
+            int keys = 0;
+            int refined = 0;
+            int reclaimed = 0;
+            int scrap = 0;
+
+            foreach (KeyValuePair<string, int> kv in byName)
+            {
+                string n = kv.Key;
+                int c = kv.Value;
+                if (NameCmp.Equals(n, "Mann Co. Supply Crate Key")) keys += c;
+                else if (NameCmp.Equals(n, "Refined Metal")) refined += c;
+                else if (NameCmp.Equals(n, "Reclaimed Metal")) reclaimed += c;
+                else if (NameCmp.Equals(n, "Scrap Metal")) scrap += c;
+            }
+
+            decimal refFromMetal = refined + (reclaimed * 0.33m) + (scrap * 0.11m);
+            decimal refFromKeys = keys * keyRefPrice;
+            return refFromMetal + refFromKeys;
+        }
+
+        private static bool OnlyPure(Dictionary<string, int> byName)
+        {
+            foreach (string n in byName.Keys)
+                if (!IsPureName(n)) return false;
+            return true;
+        }
+
+        // Count pure we GIVE in an offer
+        private static void CountPureToGive(OfferSummary s, out int keys, out int refined, out int reclaimed, out int scrap)
+        {
+            keys = 0; refined = 0; reclaimed = 0; scrap = 0;
+
+            foreach (KeyValuePair<string, int> kv in s.ItemsToGiveByName)
+            {
+                if (NameCmp.Equals(kv.Key, "Mann Co. Supply Crate Key")) keys += kv.Value;
+                else if (NameCmp.Equals(kv.Key, "Refined Metal")) refined += kv.Value;
+                else if (NameCmp.Equals(kv.Key, "Reclaimed Metal")) reclaimed += kv.Value;
+                else if (NameCmp.Equals(kv.Key, "Scrap Metal")) scrap += kv.Value;
+            }
+        }
+        // Ensure we have enough pure to GIVE (inventory snapshot via community inventory)
+        private async Task<(bool Ok, string Reason)> CheckPureBalanceAsync(OfferSummary summary)
+        {
+            int needKeys; int needRef; int needRec; int needScrap;
+            CountPureToGive(summary, out needKeys, out needRef, out needRec, out needScrap);
+
+            if (needKeys == 0 && needRef == 0 && needRec == 0 && needScrap == 0)
+            {
+                return (true, string.Empty); // nothing to give
+            }
+
+            PureSnapshot inv = await GetPureSnapshotAsync();
+
+            if (needKeys > inv.Keys)
+                return (false, "insufficient keys: need " + needKeys + ", have " + inv.Keys);
+
+            if (needRef > inv.Refined)
+                return (false, "insufficient refined: need " + needRef + ", have " + inv.Refined);
+
+            if (needRec > inv.Reclaimed)
+                return (false, "insufficient reclaimed: need " + needRec + ", have " + inv.Reclaimed);
+
+            if (needScrap > inv.Scrap)
+                return (false, "insufficient scrap: need " + needScrap + ", have " + inv.Scrap);
+
+            return (true, string.Empty);
+        }
+
+        // Count how many of the given item names we currently hold in our TF2 inventory.
+        private async Task<Dictionary<string, int>> GetCountsForNamesAsync(IEnumerable<string> names)
+        {
+            // Build a target set with both exact and "no leading The"
+            HashSet<string> targets = new HashSet<string>(NameCmp);
+            foreach (string nm in names)
+            {
+                string stripped = StripLeadingThe(nm);
+                targets.Add(nm);
+                targets.Add(stripped);
+                targets.Add("The " + stripped);
+            }
+
+            Dictionary<string, int> result = new Dictionary<string, int>(NameCmp);
+            InvResponse? inv = await FetchCommunityInventoryAsync();
+            if (inv == null) return result;
+
+            var dx = new Dictionary<string, InvDesc>(StringComparer.Ordinal);
+            foreach (var d in inv.descriptions)
+                dx[d.classid + "_" + d.instanceid] = d;
+
+            foreach (var a in inv.assets)
+            {
+                if (!dx.TryGetValue(a.classid + "_" + a.instanceid, out var d)) continue;
+                string n = !string.IsNullOrEmpty(d.market_hash_name) ? d.market_hash_name : d.name;
+                string ns = StripLeadingThe(n);
+
+                if (targets.Contains(n) || targets.Contains(ns))
+                {
+                    if (!result.ContainsKey(n)) result[n] = 0;
+                    result[n]++;
+                }
+            }
+
+            return result;
+        }
+
+        // Ensure accepting won't exceed BuyConfig.MaxQuantity for any tracked item we RECEIVE.
+        private async Task<(bool Ok, string Reason)> CheckStockCapsAsync(OfferSummary summary, ConfigRoot cfg)
+        {
+            // Which non-pure items would we add?
+            Dictionary<string, int> toReceive = new Dictionary<string, int>(NameCmp);
+            foreach (KeyValuePair<string, int> kv in summary.ItemsToReceiveByName)
+            {
+                if (!IsPureName(kv.Key))
+                    toReceive[kv.Key] = kv.Value;
+            }
+
+            if (toReceive.Count == 0)
+                return (true, string.Empty);
+
+            // Build quick lookup of configured max quantities
+            Dictionary<string, int> maxByName = new Dictionary<string, int>(NameCmp);
+            foreach (BuyConfig b in cfg.BuyConfig)
+                maxByName[b.Name] = b.MaxQuantity;
+
+            // Get our current counts for just these names
+            Dictionary<string, int> current = await GetCountsForNamesAsync(toReceive.Keys);
+
+            foreach (KeyValuePair<string, int> kv in toReceive)
+            {
+                string name = kv.Key;
+                int need = kv.Value;
+
+                // If the item isn't in BuyConfig, the basic policy should have blocked earlier. Skip here.
+                int max;
+                if (!maxByName.TryGetValue(name, out max) || max <= 0)
+                    continue;
+
+                int have = current.ContainsKey(name) ? current[name] : 0;
+
+                if (have + need > max)
+                {
+                    string reason = "stock cap for " + name + ": have " + have.ToString(CultureInfo.InvariantCulture) +
+                                    ", need " + need.ToString(CultureInfo.InvariantCulture) +
+                                    ", max " + max.ToString(CultureInfo.InvariantCulture);
+                    return (false, reason);
+                }
+            }
+
+            return (true, string.Empty);
+        }
+
+
+
+        // ---------- HTTP actions ----------
+
+        private async Task<bool> AcceptOfferAsync(string offerId, string partnerSteamId64)
+        {
+            string url = "https://api.steampowered.com/IEconService/AcceptTradeOffer/v1/";
+            using HttpRequestMessage req = new HttpRequestMessage(HttpMethod.Post, url);
+            req.Content = new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                { "key", _apiKey },
+                { "tradeofferid", offerId },
+                { "partner", partnerSteamId64 }
+            });
+
+            HttpResponseMessage resp = await _http.SendAsync(req);
+            string body = await resp.Content.ReadAsStringAsync();
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                Console.WriteLine("[Trade] Accept failed HTTP " + ((int)resp.StatusCode).ToString(CultureInfo.InvariantCulture) + " → " + body);
+                return false;
+            }
+
+            Console.WriteLine("[Trade] Accepted offer " + offerId + " (partner " + partnerSteamId64 + ").");
+            return true;
+        }
+
+        private async Task<bool> DeclineOfferAsync(string offerId)
+        {
+            string url = "https://api.steampowered.com/IEconService/DeclineTradeOffer/v1/";
+            using HttpRequestMessage req = new HttpRequestMessage(HttpMethod.Post, url);
+            req.Content = new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                { "key", _apiKey },
+                { "tradeofferid", offerId }
+            });
+
+            HttpResponseMessage resp = await _http.SendAsync(req);
+            string body = await resp.Content.ReadAsStringAsync();
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                Console.WriteLine("[Trade] Decline failed HTTP " + ((int)resp.StatusCode).ToString(CultureInfo.InvariantCulture) + " → " + body);
+                return false;
+            }
+
+            Console.WriteLine("[Trade] Declined offer " + offerId + ".");
+            return true;
+        }
+
+        // ---------- Summarization & utils ----------
 
         private static string AccountIdToSteamId64(int accountId)
         {
-            // 76561197960265728 is SteamID64 base
             long id64 = 76561197960265728L + (long)accountId;
             return id64.ToString(CultureInfo.InvariantCulture);
         }
@@ -220,6 +762,55 @@ namespace ArkRoxBot.Services
             return map;
         }
 
+        // Prefer market_hash_name over name (Name Tags can't spoof market_hash_name)
+        private static string CanonicalName(Description d)
+        {
+            if (!string.IsNullOrEmpty(d.market_hash_name))
+                return d.market_hash_name;
+            if (!string.IsNullOrEmpty(d.name))
+                return d.name;
+            return (d.classid + "_" + d.instanceid);
+        }
+        private async Task<HashSet<string>?> TryGetAssetIdsViaWebApiAsync()
+        {
+            try
+            {
+                string econUrl =
+                    "https://api.steampowered.com/IEconItems_440/GetPlayerItems/v1/?" +
+                    "key=" + Uri.EscapeDataString(_apiKey) +
+                    "&steamid=" + Uri.EscapeDataString(_botSteamId64);
+
+                using var resp = await _http.GetAsync(econUrl);
+                if (!resp.IsSuccessStatusCode) return null;
+
+                string body = await resp.Content.ReadAsStringAsync();
+                var econ = JsonConvert.DeserializeObject<EconItemsResponse>(body);
+
+                // Steam returns status==1 for success. Anything else → treat as empty.
+                if (econ?.result?.status != 1 || econ.result.items == null)
+                    return new HashSet<string>(StringComparer.Ordinal);
+
+                var ids = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var it in econ.result.items)
+                {
+                    // id can be large; keeping it as string is good
+                    if (!string.IsNullOrEmpty(it.id))
+                        ids.Add(it.id);
+                }
+
+                if (ids.Count > 0)
+                    Console.WriteLine("[Inv] Asset ids via Web API: " + ids.Count);
+
+                return ids;
+            }
+            catch
+            {
+                return null; // fall back to community inventory
+            }
+        }
+
+
+
         private static OfferSummary SummarizeOffer(TradeOffer offer, Dictionary<string, Description> descIndex)
         {
             OfferSummary s = new OfferSummary();
@@ -231,18 +822,19 @@ namespace ArkRoxBot.Services
                     if (a.appid != 440) continue; // TF2 only
 
                     string dkey = a.classid + "_" + a.instanceid;
-                    string name = descIndex.TryGetValue(dkey, out Description d) && !string.IsNullOrEmpty(d.name)
-                        ? d.name
-                        : dkey;
+                    string rawName = dkey;
+                    if (descIndex.TryGetValue(dkey, out Description d))
+                    {
+                        rawName = !string.IsNullOrEmpty(d.market_hash_name) ? d.market_hash_name : d.name;
+                    }
+                    string name = StripLeadingThe(rawName);
 
                     int count = 1;
                     if (!string.IsNullOrEmpty(a.amount))
                     {
                         int parsed;
                         if (int.TryParse(a.amount, NumberStyles.Integer, CultureInfo.InvariantCulture, out parsed) && parsed > 0)
-                        {
                             count = parsed;
-                        }
                     }
 
                     if (!s.ItemsToReceiveByName.ContainsKey(name))
@@ -259,18 +851,19 @@ namespace ArkRoxBot.Services
                     if (a.appid != 440) continue;
 
                     string dkey = a.classid + "_" + a.instanceid;
-                    string name = descIndex.TryGetValue(dkey, out Description d) && !string.IsNullOrEmpty(d.name)
-                        ? d.name
-                        : dkey;
+                    string rawName = dkey;
+                    if (descIndex.TryGetValue(dkey, out Description d))
+                    {
+                        rawName = !string.IsNullOrEmpty(d.market_hash_name) ? d.market_hash_name : d.name;
+                    }
+                    string name = StripLeadingThe(rawName);
 
                     int count = 1;
                     if (!string.IsNullOrEmpty(a.amount))
                     {
                         int parsed;
                         if (int.TryParse(a.amount, NumberStyles.Integer, CultureInfo.InvariantCulture, out parsed) && parsed > 0)
-                        {
                             count = parsed;
-                        }
                     }
 
                     if (!s.ItemsToGiveByName.ContainsKey(name))
@@ -283,60 +876,11 @@ namespace ArkRoxBot.Services
             return s;
         }
 
-        private static string FormatDict(Dictionary<string, int> d)
+        private static string StripLeadingThe(string s)
         {
-            if (d.Count == 0) return "(none)";
-            List<string> parts = new List<string>();
-            foreach (KeyValuePair<string, int> kv in d)
-                parts.Add(kv.Value.ToString(CultureInfo.InvariantCulture) + "× " + kv.Key);
-            return string.Join(", ", parts);
-        }
-
-        public void Stop()
-        {
-            // Atomically grab and clear the CTS (so Stop/Dispose can be called multiple times)
-            System.Threading.CancellationTokenSource? cts =
-                System.Threading.Interlocked.Exchange(ref _cts, null);
-
-            if (cts == null)
-            {
-                // Never started (or already stopped) — nothing to do
-                return;
-            }
-
-            try { cts.Cancel(); } catch { }
-
-            try
-            {
-                // If you use a timer-based poller
-                if (_timer != null)
-                {
-                    _timer.Change(System.Threading.Timeout.Infinite, System.Threading.Timeout.Infinite);
-                    _timer.Dispose();
-                    _timer = null;
-                }
-            }
-            catch { }
-
-            try
-            {
-                // If you use a loop task instead of a timer, wait briefly
-                _loopTask?.Wait(TimeSpan.FromSeconds(2));
-            }
-            catch { }
-
-            try { _http.CancelPendingRequests(); } catch { }
-
-            cts.Dispose();
-        }
-
-        public void Dispose()
-        {
-            // Safe even if Start() never ran
-            Stop();
-
-            // HttpClient is always created in ctor, so it’s safe to dispose
-            _http.Dispose();
+            if (string.IsNullOrEmpty(s)) return s;
+            s = s.Trim();
+            return s.StartsWith("The ", StringComparison.OrdinalIgnoreCase) ? s.Substring(4) : s;
         }
         private static void LogOfferSummary(string offerId, string partnerSteamId64, OfferSummary s)
         {
@@ -346,18 +890,14 @@ namespace ArkRoxBot.Services
             {
                 Console.WriteLine("  We RECEIVE:");
                 foreach (KeyValuePair<string, int> kv in s.ItemsToReceiveByName)
-                {
                     Console.WriteLine("    + " + kv.Value.ToString(CultureInfo.InvariantCulture) + " × " + kv.Key);
-                }
             }
 
             if (s.ItemsToGiveByName.Count > 0)
             {
                 Console.WriteLine("  We GIVE:");
                 foreach (KeyValuePair<string, int> kv in s.ItemsToGiveByName)
-                {
                     Console.WriteLine("    - " + kv.Value.ToString(CultureInfo.InvariantCulture) + " × " + kv.Key);
-                }
             }
 
             if (s.ItemsToReceiveByName.Count == 0 && s.ItemsToGiveByName.Count == 0)
@@ -365,6 +905,79 @@ namespace ArkRoxBot.Services
                 Console.WriteLine("  (no TF2 items in this offer)");
             }
         }
+
+        private async Task<InvResponse?> FetchCommunityInventoryAsync()
+        {
+            string url = $"https://steamcommunity.com/profiles/{_botSteamId64}/inventory/440/2?l=english&count=5000";
+
+            try
+            {
+                using var req = new HttpRequestMessage(HttpMethod.Get, url);
+                req.Headers.TryAddWithoutValidation("Accept", "application/json,text/plain,*/*");
+                req.Headers.TryAddWithoutValidation("X-Requested-With", "XMLHttpRequest");
+
+                using var resp = await _http.SendAsync(req);
+                if (!resp.IsSuccessStatusCode)
+                {
+                    Console.WriteLine("[Inv] HTTP " + (int)resp.StatusCode + " at " + url);
+                    return null;
+                }
+
+                string text = await resp.Content.ReadAsStringAsync();
+                if (text.Length > 0 && text[0] == '<')
+                {
+                    Console.WriteLine("[Inv] Non-JSON inventory payload (HTML) from " + url);
+                    return null;
+                }
+
+                return JsonConvert.DeserializeObject<InvResponse>(text);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[Inv] Error " + ex.Message + " at " + url);
+                return null;
+            }
+        }
+
+
+        private async Task<PureSnapshot> GetPureSnapshotAsync()
+        {
+            // serve cached within 60s
+            if (_pureCache != null && (DateTime.UtcNow - _pureCacheUtc) < TimeSpan.FromSeconds(60))
+                return _pureCache;
+
+            PureSnapshot snap = new PureSnapshot();
+
+            InvResponse? inv = await FetchCommunityInventoryAsync();
+            if (inv == null)
+            {
+                Console.WriteLine("[Inv] inventory unavailable; assuming zero pure.");
+                _pureCache = snap;
+                _pureCacheUtc = DateTime.UtcNow;
+                return snap;
+            }
+
+            var dx = new Dictionary<string, InvDesc>(StringComparer.Ordinal);
+            foreach (var d in inv.descriptions)
+                dx[d.classid + "_" + d.instanceid] = d;
+
+            foreach (var a in inv.assets)
+            {
+                if (!dx.TryGetValue(a.classid + "_" + a.instanceid, out var d)) continue;
+                string n = !string.IsNullOrEmpty(d.market_hash_name) ? d.market_hash_name : d.name;
+
+                if (NameCmp.Equals(n, "Mann Co. Supply Crate Key")) snap.Keys++;
+                else if (NameCmp.Equals(n, "Refined Metal")) snap.Refined++;
+                else if (NameCmp.Equals(n, "Reclaimed Metal")) snap.Reclaimed++;
+                else if (NameCmp.Equals(n, "Scrap Metal")) snap.Scrap++;
+            }
+
+            _pureCache = snap;
+            _pureCacheUtc = DateTime.UtcNow;
+            Console.WriteLine($"[Inv] Keys={snap.Keys} Ref={snap.Refined} Rec={snap.Reclaimed} Scr={snap.Scrap}");
+            return snap;
+        }
+
 
 
         // --------- DTOs for GetTradeOffers ---------
@@ -408,13 +1021,90 @@ namespace ArkRoxBot.Services
             public string market_hash_name { get; set; } = string.Empty;
         }
 
-        private sealed class OfferSummary
-        {
-            public Dictionary<string, int> ItemsToReceiveByName { get; } =
-                new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
-            public Dictionary<string, int> ItemsToGiveByName { get; } =
-                new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        // ---- community inventory (pure snapshot) ----
+
+        private static readonly HttpStatusCode[] TransientHttp =
+{
+    HttpStatusCode.BadRequest,     // Steam CF sometimes 400s this endpoint
+    (HttpStatusCode)429,           // rate limited
+    HttpStatusCode.ServiceUnavailable,
+    HttpStatusCode.GatewayTimeout
+};
+
+        private sealed class EconItemsResponse
+        {
+            public EconResult? result { get; set; }
+        }
+        private sealed class EconResult
+        {
+            public int status { get; set; }
+            public List<EconItem>? items { get; set; }
+        }
+        private sealed class EconItem
+        {
+            public string id { get; set; } = "";       // ← TF2 assetid
+            public int defindex { get; set; }          // 5021=key, 5002=ref, 5001=rec, 5000=scrap
+            public int quantity { get; set; } = 1;
+        }
+
+        private sealed class InvResponse
+        {
+            public List<InvAsset>? assets { get; set; }
+            public List<InvDesc>? descriptions { get; set; }
+        }
+        private sealed class InvAsset
+        {
+            public string assetid { get; set; } = string.Empty;
+            public string classid { get; set; } = string.Empty;
+            public string instanceid { get; set; } = string.Empty;
+        }
+
+        private sealed class InvDesc
+        {
+            public string classid { get; set; } = string.Empty;
+            public string instanceid { get; set; } = string.Empty;
+            public string name { get; set; } = string.Empty;
+            public string market_hash_name { get; set; } = string.Empty;
+        }
+        private sealed class PureSnapshot
+        {
+            public int Keys { get; set; }
+            public int Refined { get; set; }
+            public int Reclaimed { get; set; }
+            public int Scrap { get; set; }
+        }
+
+        // ---- Stop/Dispose ----
+
+        public void Stop()
+        {
+            System.Threading.CancellationTokenSource? cts = System.Threading.Interlocked.Exchange(ref _cts, null);
+            if (cts == null) return;
+
+            try { cts.Cancel(); } catch { }
+
+            try
+            {
+                if (_timer != null)
+                {
+                    _timer.Change(System.Threading.Timeout.Infinite, System.Threading.Timeout.Infinite);
+                    _timer.Dispose();
+                    _timer = null;
+                }
+            }
+            catch { }
+
+            try { _loopTask?.Wait(TimeSpan.FromSeconds(2)); } catch { }
+            try { _http.CancelPendingRequests(); } catch { }
+
+            cts.Dispose();
+        }
+
+        public void Dispose()
+        {
+            Stop();
+            _http.Dispose();
         }
     }
 }

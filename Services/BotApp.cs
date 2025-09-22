@@ -33,6 +33,7 @@ namespace ArkRoxBot.Services
 
             // Start trade poller
             _trades.Start();
+            _ = _trades.LogStockSnapshotOnceAsync();
 
             // Kick the pricing pipeline once in the background
             _botRunTask = Task.Run(() => _bot.RunAsync(), cancellationToken);

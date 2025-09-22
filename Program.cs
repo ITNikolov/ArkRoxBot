@@ -21,11 +21,19 @@ internal static class Program
                 services.AddSingleton<ItemConfigLoader>(_ => new ItemConfigLoader("Data/items.json"));
 
                 services.AddSingleton<ISteamClientService, SteamClientService>();
+
+                services.AddSingleton<OfferEvaluator>(sp =>
+                {
+                    var store = sp.GetRequiredService<PriceStore>();
+                    const decimal minProfitRef = 0.11m;
+                    return new OfferEvaluator(store, minProfitRef);
+                });
+
                 services.AddSingleton<TradeService>(sp =>
                 {
-                    PriceStore store = sp.GetRequiredService<PriceStore>();
-                    ItemConfigLoader items = sp.GetRequiredService<ItemConfigLoader>();
-                    OfferEvaluator evaluator = sp.GetRequiredService<OfferEvaluator>();
+                    var store = sp.GetRequiredService<PriceStore>();
+                    var items = sp.GetRequiredService<ItemConfigLoader>();
+                    var evaluator = sp.GetRequiredService<OfferEvaluator>();
 
                     string apiKey = "A6FEBC05BEAD8EAC88F2439A5E8B8741";
                     string botId = "76561199466477276";
@@ -35,17 +43,33 @@ internal static class Program
 
                 services.AddSingleton<InventoryService>(sp =>
                 {
-                    var botId = "76561199466477276"; // same as TradeService
+                    var botId = "76561199466477276";
                     return new InventoryService(botId);
                 });
-                services.AddSingleton<BotService>();
 
+                services.AddSingleton<BotService>();       // ok even if no Stop()
 
                 services.AddHostedService<BotApp>();
-
             })
             .Build();
 
-        await host.RunAsync(); 
+        var sp = host.Services;
+        var lifetime = sp.GetRequiredService<IHostApplicationLifetime>();
+
+        lifetime.ApplicationStopping.Register(() =>
+        {
+            try { sp.GetRequiredService<TradeService>().Stop(); } catch { }
+            // If BotService has no Stop(), keep this line removed:
+            // try { sp.GetRequiredService<BotService>().Stop(); } catch {}
+            try { sp.GetRequiredService<SteamClientService>().Disconnect(); } catch { }
+        });
+
+        Console.CancelKeyPress += async (_, e) =>
+        {
+            e.Cancel = true;
+            try { await host.StopAsync(); } catch { }
+        };
+
+        await host.RunAsync();
     }
 }

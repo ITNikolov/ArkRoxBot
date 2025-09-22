@@ -77,20 +77,54 @@ namespace ArkRoxBot.Services
                 return string.Empty;
             }
 
-            string urlName = Uri.EscapeDataString(itemName);
-            string url = $"https://backpack.tf/classifieds?page={page}&item={urlName}&quality=6&tradable=1&craftable=1&australium=-1&killstreak_tier=0";
+            // --- normalize & encode the item name ---
+            string item = (itemName ?? string.Empty).Trim();          // kill stray spaces
+            item = StripLeadingThe(item);                              // "The Team Captain" -> "Team Captain"
+                                                                       // Optional: collapse internal double spaces if you want:
+                                                                       // item = Regex.Replace(item, @"\s+", " ");
 
-            await _sharedPage.GotoAsync(url, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-            await Task.Delay(3000);
+            string itemParam = Uri.EscapeDataString(item);
 
-            await _sharedPage.WaitForSelectorAsync("li.listing", new PageWaitForSelectorOptions
+            string url = $"https://backpack.tf/classifieds?page={page}" +
+                         $"&item={itemParam}" +
+                         $"&quality=6&tradable=1&craftable=1&australium=-1&killstreak_tier=0";
+
+            Console.WriteLine("[BP] URL -> " + url);
+
+            // Navigate
+            await _sharedPage.GotoAsync(url, new PageGotoOptions
             {
-                Timeout = 15000,
-                State = WaitForSelectorState.Visible
+                WaitUntil = WaitUntilState.DOMContentLoaded,
+                Timeout = 45000
             });
 
+            // Wait for either listings or the empty state; backpack.tf is dynamic
+            var listingsTask = _sharedPage.WaitForSelectorAsync("li.listing", new()
+            {
+                Timeout = 12000,
+                State = WaitForSelectorState.Attached
+            });
+            var emptyTask = _sharedPage.WaitForSelectorAsync(":has-text('No items found')", new()
+            {
+                Timeout = 12000,
+                State = WaitForSelectorState.Attached
+            });
+
+            try { await Task.WhenAny(listingsTask, emptyTask); }
+            catch { /* ignore; we'll return the HTML anyway */ }
+
+            // Small settle delay for dynamic content
+            await Task.Delay(1000);
 
             return await _sharedPage.ContentAsync();
+        }
+
+        // Put this helper in the same class (or share a common helper if you already have one)
+        private static string StripLeadingThe(string s)
+        {
+            if (string.IsNullOrWhiteSpace(s)) return s ?? string.Empty;
+            s = s.Trim();
+            return s.StartsWith("The ", StringComparison.OrdinalIgnoreCase) ? s.Substring(4) : s;
         }
 
         public async Task<List<ListingData>> FetchAllPagesAsync(string itemName)
