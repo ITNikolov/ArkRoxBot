@@ -127,14 +127,13 @@ namespace ArkRoxBot.Services
         public async Task StopAsync(TimeSpan? timeout = null)
         {
             TimeSpan wait = timeout ?? TimeSpan.FromSeconds(5);
-
             Console.WriteLine("Steam: Shutting down…");
 
             try
             {
                 try { _friends.SetPersonaState(EPersonaState.Offline); } catch { }
+                try { Thread.Sleep(750); } catch { }                  // give presence a moment to propagate
                 try { _user.LogOff(); } catch { }
-
                 _loggedOffSignal.Wait(wait);
             }
             catch (Exception ex)
@@ -154,11 +153,9 @@ namespace ArkRoxBot.Services
 
             try
             {
-                if (_pumpCts != null) { _pumpCts.Cancel(); }
+                _pumpCts?.Cancel();
                 if (_pumpTask != null)
-                {
-                    Task completed = await Task.WhenAny(_pumpTask, Task.Delay(wait));
-                }
+                    await Task.WhenAny(_pumpTask, Task.Delay(wait));
             }
             catch (Exception ex)
             {
@@ -166,17 +163,12 @@ namespace ArkRoxBot.Services
             }
             finally
             {
-                if (_pumpCts != null) { _pumpCts.Dispose(); _pumpCts = null; }
+                _pumpCts?.Dispose(); _pumpCts = null;
                 _pumpTask = null;
             }
 
             Console.WriteLine("[SteamClientService] Stopped gracefully.");
         }
-
-
-
-
-
 
         // -------------------------
         // Login (password + 2FA only)

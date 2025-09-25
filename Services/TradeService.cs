@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using ArkRoxBot.Models;
 using ArkRoxBot.Models.Config;
 using Newtonsoft.Json;
+using SteamKit2.WebUI.Internal;
 
 namespace ArkRoxBot.Services
 {
@@ -23,37 +24,72 @@ namespace ArkRoxBot.Services
         private readonly string _apiKey;
         private readonly string _botSteamId64;
         private readonly bool _verifySellAssets;
-
+        private HttpClient? _communityHttp;
+        private string? _sessionId;
+        private readonly HttpClient _community;
+        private readonly CookieContainer _cookieJar = new CookieContainer();
 
         private System.Threading.Timer? _timer;
         private System.Threading.CancellationTokenSource? _cts;
         private Task? _loopTask;
         private int _isPolling = 0;
         private const decimal AcceptToleranceRef = 0.02m; // was 0.01m
+        private decimal _sellTolRef;
 
 
         // simple cache for inventory pure snapshot (reduce calls)
         private PureSnapshot? _pureCache;
         private DateTime _pureCacheUtc;
 
-        public TradeService(PriceStore priceStore,
-                            ItemConfigLoader configLoader,
-                            string apiKey,
-                            string botSteamId64,
-                            OfferEvaluator evaluator)
+
+        public TradeService(
+    PriceStore priceStore,
+    ItemConfigLoader configLoader,
+    string apiKey,
+    string botSteamId64,
+    OfferEvaluator evaluator)
         {
-            _http = new HttpClient();
-            _priceStore = priceStore;
-            _configLoader = configLoader;
+            _priceStore = priceStore ?? throw new ArgumentNullException(nameof(priceStore));
+            _configLoader = configLoader ?? throw new ArgumentNullException(nameof(configLoader));
             _apiKey = apiKey ?? string.Empty;
             _botSteamId64 = botSteamId64 ?? string.Empty;
-            _evaluator = evaluator;
+            _evaluator = evaluator ?? throw new ArgumentNullException(nameof(evaluator));
 
-            // Helpful UAs for Steam community endpoints
+            // ---------- Cookie jar ----------
+            _cookieJar = new System.Net.CookieContainer();
+
+            // ---------- General API client (Steam Web API, backpack.tf, etc.) ----------
+            System.Net.Http.HttpClientHandler apiHandler = new System.Net.Http.HttpClientHandler
+            {
+                AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate
+            };
+            _http = new HttpClient(apiHandler);
+            _http.Timeout = TimeSpan.FromSeconds(30);
             _http.DefaultRequestHeaders.UserAgent.ParseAdd(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36");
-            _http.DefaultRequestHeaders.UserAgent.ParseAdd("ArkRoxBot/1.0 (+https://example)");
+            _http.DefaultRequestHeaders.UserAgent.ParseAdd("ArkRoxBot/1.0");
 
+            // ---------- Community client (tradeoffer accept/decline) ----------
+            System.Net.Http.HttpClientHandler communityHandler = new System.Net.Http.HttpClientHandler
+            {
+                CookieContainer = _cookieJar,
+                AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate,
+                AllowAutoRedirect = false,
+                UseCookies = true
+            };
+            _community = new HttpClient(communityHandler);
+            _community.Timeout = TimeSpan.FromSeconds(30);
+            _community.DefaultRequestHeaders.UserAgent.ParseAdd(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36");
+            _community.DefaultRequestHeaders.UserAgent.ParseAdd("ArkRoxBot/1.0");
+            _community.DefaultRequestHeaders.Accept.ParseAdd("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+            _community.DefaultRequestHeaders.AcceptLanguage.ParseAdd("en-US,en;q=0.9");
+
+            // ---------- Load cookies from env (to BOTH domains) + debug dump ----------
+            LoadCommunityCookiesFromEnvDual();
+            DumpCommunityCookieDebug();
+
+            // ---------- Feature flags ----------
             _tradingEnabled = string.Equals(
                 Environment.GetEnvironmentVariable("TRADING_ENABLED"),
                 "true",
@@ -69,10 +105,30 @@ namespace ArkRoxBot.Services
                 "false",
                 StringComparison.OrdinalIgnoreCase);
 
+            // ---------- SELL tolerance (parse -> assign) ----------
+            string tolRaw = Environment.GetEnvironmentVariable("SELL_TOL_REF") ?? string.Empty;
+            decimal parsedTol;
+            if (decimal.TryParse(
+                    tolRaw,
+                    System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out parsedTol))
+            {
+                _sellTolRef = parsedTol;
+            }
+            else
+            {
+                _sellTolRef = AcceptToleranceRef;
+            }
+
             Console.WriteLine("[Trade] Flags → TRADING_ENABLED=" + _tradingEnabled +
                               ", DRY_RUN=" + _dryRun +
-                              ", VERIFY_SELL_ASSETS=" + _verifySellAssets);
+                              ", VERIFY_SELL_ASSETS=" + _verifySellAssets +
+                              ", SELL_TOL_REF=" + _sellTolRef.ToString(System.Globalization.CultureInfo.InvariantCulture));
         }
+
+
+
 
 
         public void Start()
@@ -84,7 +140,7 @@ namespace ArkRoxBot.Services
             {
                 try { await PollAsync(_cts.Token); }
                 catch (Exception ex) { Console.WriteLine("[Trade] Timer poll error: " + ex.Message); }
-            }, null, TimeSpan.Zero, TimeSpan.FromSeconds(30));
+            }, null, TimeSpan.Zero, TimeSpan.FromSeconds(5));
         }
 
         private async Task PollAsync(CancellationToken ct)
@@ -142,6 +198,95 @@ namespace ArkRoxBot.Services
             }
         }
 
+        private static async Task<string> SafeReadSnippetAsync(HttpResponseMessage resp)
+        {
+            try
+            {
+                string body = await resp.Content.ReadAsStringAsync();
+                if (string.IsNullOrEmpty(body))
+                {
+                    return "(empty)";
+                }
+                int len = Math.Min(280, body.Length);
+                return body.Substring(0, len).Replace("\r", " ").Replace("\n", " ");
+            }
+            catch
+            {
+                return "(no body)";
+            }
+        }
+
+        private void LoadCommunityCookiesFromEnvDual()
+        {
+            string sessionId = Environment.GetEnvironmentVariable("STEAM_SESSIONID") ?? string.Empty;
+            string steamLoginSecure = Environment.GetEnvironmentVariable("STEAM_LOGIN_SECURE") ?? string.Empty;
+
+            if (string.IsNullOrWhiteSpace(sessionId) || string.IsNullOrWhiteSpace(steamLoginSecure))
+            {
+                Console.WriteLine("[Trade] Env cookies missing (STEAM_SESSIONID / STEAM_LOGIN_SECURE).");
+                return;
+            }
+
+            // Add cookies for both steamcommunity.com and .steamcommunity.com
+            AddCookie("https://steamcommunity.com/", "steamcommunity.com", "sessionid", sessionId, false);
+            AddCookie("https://steamcommunity.com/", ".steamcommunity.com", "sessionid", sessionId, false);
+
+            AddCookie("https://steamcommunity.com/", "steamcommunity.com", "steamLoginSecure", steamLoginSecure, true);
+            AddCookie("https://steamcommunity.com/", ".steamcommunity.com", "steamLoginSecure", steamLoginSecure, true);
+        }
+
+        private void AddCookie(string baseUrl, string domain, string name, string value, bool httpOnly)
+        {
+            try
+            {
+                Uri baseUri = new Uri(baseUrl);
+                System.Net.Cookie c = new System.Net.Cookie
+                {
+                    Name = name,
+                    Value = value.Trim(),
+                    Domain = domain,
+                    Path = "/",
+                    HttpOnly = httpOnly,
+                    Secure = true
+                };
+                _cookieJar.Add(baseUri, c);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[Trade] AddCookie(" + name + ") failed: " + ex.Message);
+            }
+        }
+
+
+        private void DumpCommunityCookieDebug()
+        {
+            try
+            {
+                Uri uri = new Uri("https://steamcommunity.com/");
+                System.Net.CookieCollection cookies = _cookieJar.GetCookies(uri);
+
+                Console.WriteLine("[Trade] Cookies for steamcommunity.com:");
+                foreach (System.Net.Cookie c in cookies)
+                {
+                    string valueMasked = c.Value.Length <= 6 ? c.Value : (c.Value.Substring(0, 3) + "…(" + c.Value.Length.ToString() + ")");
+                    Console.WriteLine("    " + c.Name + " = " + valueMasked + " | Domain=" + c.Domain + " | Path=" + c.Path);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[Trade] Cookie dump error: " + ex.Message);
+            }
+        }
+
+
+        public void SetCommunityCookies(string sessionId, string steamLoginSecure)
+        {
+            var baseUri = new Uri("https://steamcommunity.com/");
+            _cookieJar.Add(baseUri, new Cookie("sessionid", sessionId) { HttpOnly = false });
+            _cookieJar.Add(baseUri, new Cookie("steamLoginSecure", steamLoginSecure) { HttpOnly = true });
+        }
+
+
         private async Task<string?> GetInventoryJsonAsync()
         {
             string url = "https://steamcommunity.com/inventory/" + _botSteamId64 + "/440/2?l=english&count=5000";
@@ -187,6 +332,150 @@ namespace ArkRoxBot.Services
         {
             if (string.IsNullOrWhiteSpace(s)) return string.Empty;
             return StripLeadingThe(s).Trim();
+        }
+
+        private void EnsureCommunityHttp()
+        {
+            if (_communityHttp != null) return;
+
+            _sessionId = Environment.GetEnvironmentVariable("STEAM_SESSIONID");
+            string? steamLoginSecure = Environment.GetEnvironmentVariable("STEAM_LOGIN_SECURE");
+
+            if (string.IsNullOrWhiteSpace(_sessionId) || string.IsNullOrWhiteSpace(steamLoginSecure))
+                throw new InvalidOperationException("Missing STEAM_SESSIONID or STEAM_LOGIN_SECURE env vars.");
+
+            var handler = new HttpClientHandler { CookieContainer = _cookieJar, AutomaticDecompression = System.Net.DecompressionMethods.All };
+
+            // Set cookies for steamcommunity.com
+            var domain = ".steamcommunity.com";
+            _cookieJar.Add(new Uri("https://steamcommunity.com/"), new Cookie("sessionid", _sessionId) { Domain = domain, Path = "/" });
+            _cookieJar.Add(new Uri("https://steamcommunity.com/"), new Cookie("steamLoginSecure", steamLoginSecure) { Domain = domain, Path = "/" });
+
+            _communityHttp = new HttpClient(handler);
+            _communityHttp.DefaultRequestHeaders.Referrer = new Uri("https://steamcommunity.com/tradeoffers/");
+            _communityHttp.DefaultRequestHeaders.TryAddWithoutValidation("Origin", "https://steamcommunity.com");
+            _communityHttp.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 ArkRoxBot/1.0");
+        }
+
+        private static readonly int[] CommunityTransient = { 429, 500, 502, 503, 504 };
+
+        private async Task<bool> SendCommunityPostWithRetriesAsync(
+            string url,
+            Dictionary<string, string> form,
+            string referer,
+            string actionLabel,
+            string offerId)
+        {
+            // Quick cookie sanity
+            string sessionVal = GetCookieValue("https://steamcommunity.com", "sessionid") ?? string.Empty;
+            string loginVal = GetCookieValue("https://steamcommunity.com", "steamLoginSecure") ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(sessionVal) || string.IsNullOrWhiteSpace(loginVal))
+            {
+                Console.WriteLine("[Trade] " + actionLabel + " " + offerId + " → missing cookies (STEAM_SESSIONID/STEAM_LOGIN_SECURE).");
+                return false;
+            }
+
+            for (int attempt = 1; attempt <= 4; attempt++)
+            {
+                try
+                {
+                    HttpRequestMessage req = new HttpRequestMessage(HttpMethod.Post, url);
+                    req.Headers.Referrer = new Uri(referer);
+                    req.Headers.TryAddWithoutValidation("Origin", "https://steamcommunity.com");
+                    req.Headers.TryAddWithoutValidation("X-Requested-With", "XMLHttpRequest");
+                    req.Headers.TryAddWithoutValidation("Accept", "application/json, text/javascript, */*; q=0.01");
+                    req.Content = new FormUrlEncodedContent(form);
+
+                    HttpResponseMessage resp = await _community.SendAsync(req);
+                    int code = (int)resp.StatusCode;
+                    string body = await resp.Content.ReadAsStringAsync();
+                    string bodyLog = TrimForLog(body);
+
+                    // 200 OK → success
+                    if (resp.IsSuccessStatusCode)
+                    {
+                        Console.WriteLine("[Trade] " + actionLabel + " OK for " + offerId + ".");
+                        return true;
+                    }
+
+                    // 302 to /login or 403 → stale/invalid cookies
+                    if (code == 302 || code == 401 || code == 403)
+                    {
+                        Console.WriteLine("[Trade] " + actionLabel + " " + offerId + " → HTTP " + code.ToString(CultureInfo.InvariantCulture) +
+                                          " (likely stale cookies). Body: " + bodyLog);
+                        return false;
+                    }
+
+                    // Steam’s classic “E502 L3” sometimes returns 502 with HTML
+                    bool mightBeE502 = code == 502 || body.IndexOf("E502", StringComparison.OrdinalIgnoreCase) >= 0;
+
+                    // Retry on transient
+                    bool isTransient = CommunityTransient.Contains(code) || mightBeE502;
+                    if (isTransient && attempt < 4)
+                    {
+                        int delayMs = 400 * attempt;
+                        Console.WriteLine("[Trade] " + actionLabel + " " + offerId + " transient HTTP " +
+                                          code.ToString(CultureInfo.InvariantCulture) + " → retrying in " +
+                                          delayMs.ToString(CultureInfo.InvariantCulture) + " ms. Body: " + bodyLog);
+                        await Task.Delay(delayMs);
+                        continue;
+                    }
+
+                    // Non-transient failure
+                    Console.WriteLine("[Trade] " + actionLabel + " " + offerId + " failed HTTP " +
+                                      code.ToString(CultureInfo.InvariantCulture) + " → " + bodyLog);
+                    return false;
+                }
+                catch (Exception ex)
+                {
+                    if (attempt < 4)
+                    {
+                        int delayMs = 400 * attempt;
+                        Console.WriteLine("[Trade] " + actionLabel + " " + offerId + " error: " + ex.Message +
+                                          " → retrying in " + delayMs.ToString(CultureInfo.InvariantCulture) + " ms");
+                        await Task.Delay(delayMs);
+                        continue;
+                    }
+                    Console.WriteLine("[Trade] " + actionLabel + " " + offerId + " error: " + ex.Message + " (giving up)");
+                    return false;
+                }
+            }
+
+            return false;
+        }
+
+        public async Task<bool> VerifyCommunityCookiesOnceAsync()
+        {
+            try
+            {
+                HttpRequestMessage req = new HttpRequestMessage(HttpMethod.Get, "https://steamcommunity.com/tradeoffers/");
+                req.Headers.Referrer = new Uri("https://steamcommunity.com/tradeoffers/");
+                req.Headers.TryAddWithoutValidation("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+
+                HttpResponseMessage resp = await _community.SendAsync(req);
+                int code = (int)resp.StatusCode;
+
+                if (code == 200)
+                {
+                    Console.WriteLine("[Trade] Community cookies look valid (200 at /tradeoffers/).");
+                    return true;
+                }
+
+                if (code == 302 || code == 401 || code == 403)
+                {
+                    Console.WriteLine("[Trade] Community cookie check HTTP " + code.ToString(CultureInfo.InvariantCulture) +
+                                      " → please refresh STEAM_SESSIONID and STEAM_LOGIN_SECURE for the bot account.");
+                    return false;
+                }
+
+                Console.WriteLine("[Trade] Community cookie check got HTTP " + code.ToString(CultureInfo.InvariantCulture) + ".");
+                return code == 200;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[Trade] Community cookie check error: " + ex.Message);
+                return false;
+            }
         }
 
 
@@ -248,12 +537,11 @@ namespace ArkRoxBot.Services
                     }
                     else
                     {
-                        try { await DeclineOfferAsync(offer.tradeofferid); } catch (Exception ex) { Console.WriteLine("[Trade] Decline error: " + ex.Message); }
+                        try { await DeclineOfferCommunityAsync(offer.tradeofferid); }
+                        catch (Exception ex) { Console.WriteLine("[Trade] Decline error: " + ex.Message); }
                     }
                     continue;
                 }
-
-
 
                 // ---- Decide direction
                 bool givesNonPure = summary.ItemsToGiveByName.Keys.Any(n => !IsPureName(n));
@@ -280,7 +568,8 @@ namespace ArkRoxBot.Services
                             }
                             else
                             {
-                                try { await DeclineOfferAsync(offer.tradeofferid); } catch (Exception ex) { Console.WriteLine("[Trade] Decline error: " + ex.Message); }
+                                try { await DeclineOfferCommunityAsync(offer.tradeofferid); }
+                                catch (Exception ex) { Console.WriteLine("[Trade] Decline error: " + ex.Message); }
                             }
                             continue;
                         }
@@ -301,7 +590,8 @@ namespace ArkRoxBot.Services
                             if (!_tradingEnabled || _dryRun)
                                 Console.WriteLine("[Trade] DRY-RUN: would Decline offer " + offer.tradeofferid + " (missing SELL price)");
                             else
-                                try { await DeclineOfferAsync(offer.tradeofferid); } catch (Exception ex) { Console.WriteLine("[Trade] Decline error: " + ex.Message); }
+                                try { await DeclineOfferCommunityAsync(offer.tradeofferid); }
+                                catch (Exception ex) { Console.WriteLine("[Trade] Decline error: " + ex.Message); }
                             goto NextOffer;
                         }
 
@@ -322,7 +612,7 @@ namespace ArkRoxBot.Services
                         }
                         else
                         {
-                            try { await AcceptOfferAsync(offer.tradeofferid, partner64); }
+                            try { await AcceptOfferCommunityAsync(offer.tradeofferid, partner64); }
                             catch (Exception ex) { Console.WriteLine("[Trade] Accept error: " + ex.Message); }
                         }
                     }
@@ -333,7 +623,8 @@ namespace ArkRoxBot.Services
                         if (!_tradingEnabled || _dryRun)
                             Console.WriteLine("[Trade] DRY-RUN: would Decline offer " + offer.tradeofferid + " (underpay)");
                         else
-                            try { await DeclineOfferAsync(offer.tradeofferid); } catch (Exception ex) { Console.WriteLine("[Trade] Decline error: " + ex.Message); }
+                            try { await DeclineOfferCommunityAsync(offer.tradeofferid); }
+                            catch (Exception ex) { Console.WriteLine("[Trade] Decline error: " + ex.Message); }
                     }
 
                     goto NextOffer;
@@ -355,7 +646,8 @@ namespace ArkRoxBot.Services
                         }
                         else
                         {
-                            try { await DeclineOfferAsync(offer.tradeofferid); } catch (Exception ex) { Console.WriteLine("[Trade] Decline error: " + ex.Message); }
+                            try { await DeclineOfferCommunityAsync(offer.tradeofferid); }
+                            catch (Exception ex) { Console.WriteLine("[Trade] Decline error: " + ex.Message); }
                         }
                         goto NextOffer;
                     }
@@ -371,7 +663,8 @@ namespace ArkRoxBot.Services
                         }
                         else
                         {
-                            try { await DeclineOfferAsync(offer.tradeofferid); } catch (Exception ex) { Console.WriteLine("[Trade] Decline error: " + ex.Message); }
+                            try { await DeclineOfferCommunityAsync(offer.tradeofferid); }
+                            catch (Exception ex) { Console.WriteLine("[Trade] Decline error: " + ex.Message); }
                         }
                         goto NextOffer;
                     }
@@ -395,9 +688,9 @@ namespace ArkRoxBot.Services
                         try
                         {
                             if (ev.Decision == OfferDecision.Accept)
-                                await AcceptOfferAsync(offer.tradeofferid, partner64);
+                                await AcceptOfferCommunityAsync(offer.tradeofferid, partner64);
                             else
-                                await DeclineOfferAsync(offer.tradeofferid);
+                                await DeclineOfferCommunityAsync(offer.tradeofferid);
                         }
                         catch (Exception ex)
                         {
@@ -418,7 +711,8 @@ namespace ArkRoxBot.Services
                     }
                     else
                     {
-                        try { await DeclineOfferAsync(offer.tradeofferid); } catch (Exception ex) { Console.WriteLine("[Trade] Decline error: " + ex.Message); }
+                        try { await DeclineOfferCommunityAsync(offer.tradeofferid); }
+                        catch (Exception ex) { Console.WriteLine("[Trade] Decline error: " + ex.Message); }
                     }
                 }
 
@@ -426,6 +720,8 @@ namespace ArkRoxBot.Services
                 continue;
             }
         }
+
+
         private async Task<HashSet<string>> GetLiveAssetIdsAsync()
         {
             var api = await TryGetAssetIdsViaWebApiAsync();
@@ -693,52 +989,143 @@ namespace ArkRoxBot.Services
 
         // ---------- HTTP actions ----------
 
-        private async Task<bool> AcceptOfferAsync(string offerId, string partnerSteamId64)
+        private sealed class AcceptTradeOfferEnvelope
         {
-            string url = "https://api.steampowered.com/IEconService/AcceptTradeOffer/v1/";
-            using HttpRequestMessage req = new HttpRequestMessage(HttpMethod.Post, url);
-            req.Content = new FormUrlEncodedContent(new Dictionary<string, string>
-            {
-                { "key", _apiKey },
-                { "tradeofferid", offerId },
-                { "partner", partnerSteamId64 }
-            });
+            public AcceptTradeOfferResponse response { get; set; }
+        }
+        private sealed class AcceptTradeOfferResponse
+        {
+            public string tradeofferid { get; set; } = string.Empty;
 
-            HttpResponseMessage resp = await _http.SendAsync(req);
-            string body = await resp.Content.ReadAsStringAsync();
+            // Steam sometimes returns one of these flags depending on account state
+            public bool needs_mobile_confirmation { get; set; } = false;
+            public bool needs_confirmation { get; set; } = false;
 
-            if (!resp.IsSuccessStatusCode)
-            {
-                Console.WriteLine("[Trade] Accept failed HTTP " + ((int)resp.StatusCode).ToString(CultureInfo.InvariantCulture) + " → " + body);
-                return false;
-            }
-
-            Console.WriteLine("[Trade] Accepted offer " + offerId + " (partner " + partnerSteamId64 + ").");
-            return true;
+            // Some deployments include a success int; keep it for completeness
+            public int success { get; set; } = 0;
         }
 
-        private async Task<bool> DeclineOfferAsync(string offerId)
+        private async Task<int> PreflightOfferPageAsync(string offerId)
         {
-            string url = "https://api.steampowered.com/IEconService/DeclineTradeOffer/v1/";
-            using HttpRequestMessage req = new HttpRequestMessage(HttpMethod.Post, url);
-            req.Content = new FormUrlEncodedContent(new Dictionary<string, string>
+            string url = "https://steamcommunity.com/tradeoffer/" + offerId + "/";
+            try
             {
-                { "key", _apiKey },
-                { "tradeofferid", offerId }
-            });
-
-            HttpResponseMessage resp = await _http.SendAsync(req);
-            string body = await resp.Content.ReadAsStringAsync();
-
-            if (!resp.IsSuccessStatusCode)
+                HttpRequestMessage req = new HttpRequestMessage(HttpMethod.Get, url);
+                req.Headers.Referrer = new Uri(url);
+                HttpResponseMessage resp = await _community.SendAsync(req);
+                int code = (int)resp.StatusCode;
+                if (code != 200 && code != 204)
+                {
+                    string loc = resp.Headers.Location != null ? resp.Headers.Location.ToString() : "(no Location)";
+                    Console.WriteLine("[Trade] Preflight offer page " + offerId + " HTTP " + code.ToString() + " → " + loc);
+                }
+                return code;
+            }
+            catch (Exception ex)
             {
-                Console.WriteLine("[Trade] Decline failed HTTP " + ((int)resp.StatusCode).ToString(CultureInfo.InvariantCulture) + " → " + body);
-                return false;
+                Console.WriteLine("[Trade] Preflight offer page error: " + ex.Message);
+                return -1;
+            }
+        }
+
+        private async Task<bool> AcceptOfferCommunityAsync(string offerId, string partnerSteamId64)
+        {
+            // Warm up the offer page (can set session flags server expects)
+            await PreflightOfferPageAsync(offerId);
+
+            string url = "https://steamcommunity.com/tradeoffer/" + offerId + "/accept";
+            string referer = "https://steamcommunity.com/tradeoffer/" + offerId + "/";
+            string sess = GetCookieValue("https://steamcommunity.com", "sessionid") ?? string.Empty;
+
+            Dictionary<string, string> form = new Dictionary<string, string>
+    {
+        { "sessionid", sess },
+        { "serverid", "1" },
+        { "tradeofferid", offerId },
+        { "partner", partnerSteamId64 },
+        { "captcha", "" }
+    };
+
+            HttpRequestMessage req = new HttpRequestMessage(HttpMethod.Post, url);
+            req.Headers.Referrer = new Uri(referer);
+            req.Headers.TryAddWithoutValidation("Origin", "https://steamcommunity.com");
+            req.Headers.TryAddWithoutValidation("X-Requested-With", "XMLHttpRequest");
+            req.Headers.TryAddWithoutValidation("Accept", "application/json, text/javascript, */*; q=0.01");
+            req.Content = new FormUrlEncodedContent(form);
+
+            HttpResponseMessage resp = await _community.SendAsync(req);
+            int code = (int)resp.StatusCode;
+            string loc = resp.Headers.Location != null ? resp.Headers.Location.ToString() : string.Empty;
+            string body = await SafeReadSnippetAsync(resp);
+
+            if (resp.IsSuccessStatusCode)
+            {
+                Console.WriteLine("[Trade] Community accept OK for " + offerId + ".");
+                return true;
             }
 
-            Console.WriteLine("[Trade] Declined offer " + offerId + ".");
-            return true;
+            Console.WriteLine("[Trade] Community accept failed HTTP " + code.ToString() +
+                              (string.IsNullOrEmpty(loc) ? "" : " Location=" + loc) +
+                              " -> " + body);
+            return false;
         }
+
+
+        private async Task<bool> DeclineOfferCommunityAsync(string offerId)
+        {
+            string url = "https://steamcommunity.com/tradeoffer/" + offerId + "/decline";
+            string referer = "https://steamcommunity.com/tradeoffer/" + offerId + "/";
+            string sess = GetCookieValue("https://steamcommunity.com", "sessionid") ?? string.Empty;
+
+            Dictionary<string, string> form = new Dictionary<string, string>
+    {
+        { "sessionid", sess },
+        { "serverid", "1" }
+    };
+
+            HttpRequestMessage req = new HttpRequestMessage(HttpMethod.Post, url);
+            req.Headers.Referrer = new Uri(referer);
+            req.Headers.TryAddWithoutValidation("Origin", "https://steamcommunity.com");
+            req.Headers.TryAddWithoutValidation("X-Requested-With", "XMLHttpRequest");
+            req.Headers.TryAddWithoutValidation("Accept", "application/json, text/javascript, */*; q=0.01");
+            req.Content = new FormUrlEncodedContent(form);
+
+            HttpResponseMessage resp = await _community.SendAsync(req);
+            int code = (int)resp.StatusCode;
+            string loc = resp.Headers.Location != null ? resp.Headers.Location.ToString() : string.Empty;
+            string body = await SafeReadSnippetAsync(resp);
+
+            if (resp.IsSuccessStatusCode)
+            {
+                Console.WriteLine("[Trade] Community decline OK for " + offerId + ".");
+                return true;
+            }
+
+            Console.WriteLine("[Trade] Community decline failed HTTP " + code.ToString() +
+                              (string.IsNullOrEmpty(loc) ? "" : " Location=" + loc) +
+                              " -> " + body);
+            return false;
+        }
+
+
+        private static readonly int[] TransientCodes = { 429, 500, 502, 503, 504 };
+
+        private string? GetCookieValue(string baseUrl, string name)
+        {
+            Uri uri = new Uri(baseUrl);
+            foreach (Cookie c in _cookieJar.GetCookies(uri))
+                if (string.Equals(c.Name, name, StringComparison.Ordinal)) return c.Value;
+            return null;
+        }
+
+        private static string TrimForLog(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return s;
+            s = s.Replace("\r", "").Replace("\n", " ");
+            return s.Length > 300 ? s.Substring(0, 300) + "…" : s;
+        }
+
+
 
         // ---------- Summarization & utils ----------
 

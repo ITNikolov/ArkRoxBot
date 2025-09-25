@@ -22,25 +22,30 @@ namespace ArkRoxBot.Services
 
         public Task StartAsync(CancellationToken cancellationToken)
         {
-            // Prompt (kept here so we don’t store creds)
             Console.Write("Steam username: ");
             string username = Console.ReadLine() ?? string.Empty;
             string password = ReadMasked("Steam password: ");
             string twoFactor = ReadMasked("Steam 2FA (if any): ");
 
-            // Start Steam callback pump (don’t await)
-            _ = _steam.ConnectAndLoginAsync(username, password, twoFactor);
+            // Start Steam callback pump (fire-and-forget) + log any faults
+            Task loginTask = _steam.ConnectAndLoginAsync(username, password, twoFactor);
+            _ = loginTask.ContinueWith(t =>
+            {
+                Console.WriteLine("[Steam] Login task faulted: " + (t.Exception?.GetBaseException().Message ?? "unknown"));
+            }, TaskContinuationOptions.OnlyOnFaulted);
 
-            // Start trade poller
+            // Start trade poller and quick diagnostics
             _trades.Start();
+            _ = _trades.VerifyCommunityCookiesOnceAsync();
             _ = _trades.LogStockSnapshotOnceAsync();
 
-            // Kick the pricing pipeline once in the background
+            // Pricing loop
             _botRunTask = Task.Run(() => _bot.RunAsync(), cancellationToken);
 
             Console.WriteLine("Bot running. Press Ctrl+C or close window to stop.");
             return Task.CompletedTask;
         }
+
 
         public async Task StopAsync(CancellationToken cancellationToken)
         {

@@ -59,15 +59,22 @@ internal static class Program
         lifetime.ApplicationStopping.Register(() =>
         {
             try { sp.GetRequiredService<TradeService>().Stop(); } catch { }
-            // If BotService has no Stop(), keep this line removed:
-            // try { sp.GetRequiredService<BotService>().Stop(); } catch {}
-            try { sp.GetRequiredService<SteamClientService>().Disconnect(); } catch { }
+            try
+            {
+                sp.GetRequiredService<ISteamClientService>()
+                .StopAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+            }
+            catch { }
         });
 
-        Console.CancelKeyPress += async (_, e) =>
+        AppDomain.CurrentDomain.ProcessExit += (_, __) =>
         {
-            e.Cancel = true;
-            try { await host.StopAsync(); } catch { }
+            try
+            {
+                sp.GetRequiredService<ISteamClientService>()
+                .StopAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+            }
+            catch { }
         };
 
         await host.RunAsync();

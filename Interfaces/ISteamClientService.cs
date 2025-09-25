@@ -10,9 +10,11 @@ namespace ArkRoxBot.Interfaces
         // Raised on any friend message: (steamId64, text)
         event Action<string, string>? OnFriendMessage;
 
+        Task StopAsync(TimeSpan? timeout = null);
+
         // Allow other services to send messages back
         void SendMessage(string steamId64, string text);
 
-        Task StopAsync(TimeSpan? timeout = null);
+        
     }
 }
