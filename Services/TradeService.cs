@@ -366,15 +366,6 @@ namespace ArkRoxBot.Services
             string actionLabel,
             string offerId)
         {
-            // Quick cookie sanity
-            string sessionVal = GetCookieValue("https://steamcommunity.com", "sessionid") ?? string.Empty;
-            string loginVal = GetCookieValue("https://steamcommunity.com", "steamLoginSecure") ?? string.Empty;
-            if (string.IsNullOrWhiteSpace(sessionVal) || string.IsNullOrWhiteSpace(loginVal))
-            {
-                Console.WriteLine("[Trade] " + actionLabel + " " + offerId + " → missing cookies (STEAM_SESSIONID/STEAM_LOGIN_SECURE).");
-                return false;
-            }
-
             for (int attempt = 1; attempt <= 4; attempt++)
             {
                 try
@@ -388,42 +379,32 @@ namespace ArkRoxBot.Services
 
                     HttpResponseMessage resp = await _community.SendAsync(req);
                     int code = (int)resp.StatusCode;
-                    string body = await resp.Content.ReadAsStringAsync();
-                    string bodyLog = TrimForLog(body);
+                    string body = await SafeReadSnippetAsync(resp);
+                    bool maybeE502 = code == 502 || body.IndexOf("E502", StringComparison.OrdinalIgnoreCase) >= 0;
+                    bool isTransient = Array.IndexOf(CommunityTransient, code) >= 0 || maybeE502;
 
-                    // 200 OK → success
                     if (resp.IsSuccessStatusCode)
                     {
                         Console.WriteLine("[Trade] " + actionLabel + " OK for " + offerId + ".");
                         return true;
                     }
 
-                    // 302 to /login or 403 → stale/invalid cookies
-                    if (code == 302 || code == 401 || code == 403)
+                    if ((code == 302 || code == 401 || code == 403) && attempt == 1)
                     {
-                        Console.WriteLine("[Trade] " + actionLabel + " " + offerId + " → HTTP " + code.ToString(CultureInfo.InvariantCulture) +
-                                          " (likely stale cookies). Body: " + bodyLog);
+                        Console.WriteLine("[Trade] " + actionLabel + " " + offerId + " HTTP " + code.ToString() + " → cookies invalid?");
                         return false;
                     }
 
-                    // Steam’s classic “E502 L3” sometimes returns 502 with HTML
-                    bool mightBeE502 = code == 502 || body.IndexOf("E502", StringComparison.OrdinalIgnoreCase) >= 0;
-
-                    // Retry on transient
-                    bool isTransient = CommunityTransient.Contains(code) || mightBeE502;
                     if (isTransient && attempt < 4)
                     {
                         int delayMs = 400 * attempt;
-                        Console.WriteLine("[Trade] " + actionLabel + " " + offerId + " transient HTTP " +
-                                          code.ToString(CultureInfo.InvariantCulture) + " → retrying in " +
-                                          delayMs.ToString(CultureInfo.InvariantCulture) + " ms. Body: " + bodyLog);
+                        Console.WriteLine("[Trade] " + actionLabel + " " + offerId + " transient " + code.ToString() +
+                                          " → retry in " + delayMs.ToString() + " ms.");
                         await Task.Delay(delayMs);
                         continue;
                     }
 
-                    // Non-transient failure
-                    Console.WriteLine("[Trade] " + actionLabel + " " + offerId + " failed HTTP " +
-                                      code.ToString(CultureInfo.InvariantCulture) + " → " + bodyLog);
+                    Console.WriteLine("[Trade] " + actionLabel + " " + offerId + " failed HTTP " + code.ToString() + " → " + body);
                     return false;
                 }
                 catch (Exception ex)
@@ -432,7 +413,7 @@ namespace ArkRoxBot.Services
                     {
                         int delayMs = 400 * attempt;
                         Console.WriteLine("[Trade] " + actionLabel + " " + offerId + " error: " + ex.Message +
-                                          " → retrying in " + delayMs.ToString(CultureInfo.InvariantCulture) + " ms");
+                                          " → retry in " + delayMs.ToString() + " ms.");
                         await Task.Delay(delayMs);
                         continue;
                     }
@@ -443,6 +424,7 @@ namespace ArkRoxBot.Services
 
             return false;
         }
+
 
         public async Task<bool> VerifyCommunityCookiesOnceAsync()
         {
@@ -1014,10 +996,18 @@ namespace ArkRoxBot.Services
                 req.Headers.Referrer = new Uri(url);
                 HttpResponseMessage resp = await _community.SendAsync(req);
                 int code = (int)resp.StatusCode;
+                string loc = resp.Headers.Location != null ? resp.Headers.Location.ToString() : string.Empty;
+
+                if (code == 302 && loc.IndexOf("/market/eligibilitycheck", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    Console.WriteLine("[Trade] Preflight → eligibilitycheck (OK to proceed).");
+                    return code;
+                }
+
                 if (code != 200 && code != 204)
                 {
-                    string loc = resp.Headers.Location != null ? resp.Headers.Location.ToString() : "(no Location)";
-                    Console.WriteLine("[Trade] Preflight offer page " + offerId + " HTTP " + code.ToString() + " → " + loc);
+                    Console.WriteLine("[Trade] Preflight offer page " + offerId + " HTTP " + code.ToString() +
+                                      (string.IsNullOrEmpty(loc) ? "" : " → " + loc));
                 }
                 return code;
             }
@@ -1028,10 +1018,10 @@ namespace ArkRoxBot.Services
             }
         }
 
+
         private async Task<bool> AcceptOfferCommunityAsync(string offerId, string partnerSteamId64)
         {
-            // Warm up the offer page (can set session flags server expects)
-            await PreflightOfferPageAsync(offerId);
+            await PreflightOfferPageAsync(offerId); // keep
 
             string url = "https://steamcommunity.com/tradeoffer/" + offerId + "/accept";
             string referer = "https://steamcommunity.com/tradeoffer/" + offerId + "/";
@@ -1046,30 +1036,8 @@ namespace ArkRoxBot.Services
         { "captcha", "" }
     };
 
-            HttpRequestMessage req = new HttpRequestMessage(HttpMethod.Post, url);
-            req.Headers.Referrer = new Uri(referer);
-            req.Headers.TryAddWithoutValidation("Origin", "https://steamcommunity.com");
-            req.Headers.TryAddWithoutValidation("X-Requested-With", "XMLHttpRequest");
-            req.Headers.TryAddWithoutValidation("Accept", "application/json, text/javascript, */*; q=0.01");
-            req.Content = new FormUrlEncodedContent(form);
-
-            HttpResponseMessage resp = await _community.SendAsync(req);
-            int code = (int)resp.StatusCode;
-            string loc = resp.Headers.Location != null ? resp.Headers.Location.ToString() : string.Empty;
-            string body = await SafeReadSnippetAsync(resp);
-
-            if (resp.IsSuccessStatusCode)
-            {
-                Console.WriteLine("[Trade] Community accept OK for " + offerId + ".");
-                return true;
-            }
-
-            Console.WriteLine("[Trade] Community accept failed HTTP " + code.ToString() +
-                              (string.IsNullOrEmpty(loc) ? "" : " Location=" + loc) +
-                              " -> " + body);
-            return false;
+            return await SendCommunityPostWithRetriesAsync(url, form, referer, "Community accept", offerId);
         }
-
 
         private async Task<bool> DeclineOfferCommunityAsync(string offerId)
         {
@@ -1083,29 +1051,9 @@ namespace ArkRoxBot.Services
         { "serverid", "1" }
     };
 
-            HttpRequestMessage req = new HttpRequestMessage(HttpMethod.Post, url);
-            req.Headers.Referrer = new Uri(referer);
-            req.Headers.TryAddWithoutValidation("Origin", "https://steamcommunity.com");
-            req.Headers.TryAddWithoutValidation("X-Requested-With", "XMLHttpRequest");
-            req.Headers.TryAddWithoutValidation("Accept", "application/json, text/javascript, */*; q=0.01");
-            req.Content = new FormUrlEncodedContent(form);
-
-            HttpResponseMessage resp = await _community.SendAsync(req);
-            int code = (int)resp.StatusCode;
-            string loc = resp.Headers.Location != null ? resp.Headers.Location.ToString() : string.Empty;
-            string body = await SafeReadSnippetAsync(resp);
-
-            if (resp.IsSuccessStatusCode)
-            {
-                Console.WriteLine("[Trade] Community decline OK for " + offerId + ".");
-                return true;
-            }
-
-            Console.WriteLine("[Trade] Community decline failed HTTP " + code.ToString() +
-                              (string.IsNullOrEmpty(loc) ? "" : " Location=" + loc) +
-                              " -> " + body);
-            return false;
+            return await SendCommunityPostWithRetriesAsync(url, form, referer, "Community decline", offerId);
         }
+
 
 
         private static readonly int[] TransientCodes = { 429, 500, 502, 503, 504 };
