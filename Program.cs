@@ -62,7 +62,7 @@ internal static class Program
             try
             {
                 sp.GetRequiredService<ISteamClientService>()
-                .StopAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+                    .StopAsync(TimeSpan.FromSeconds(20)).GetAwaiter().GetResult();
             }
             catch { }
         });
@@ -72,10 +72,11 @@ internal static class Program
             try
             {
                 sp.GetRequiredService<ISteamClientService>()
-                .StopAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+                    .StopAsync(TimeSpan.FromSeconds(20)).GetAwaiter().GetResult();
             }
             catch { }
         };
+
 
         await host.RunAsync();
     }

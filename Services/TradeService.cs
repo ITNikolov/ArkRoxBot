@@ -36,8 +36,12 @@ namespace ArkRoxBot.Services
         private const decimal AcceptToleranceRef = 0.02m; // was 0.01m
         private decimal _sellTolRef;
 
+        // Trusted partners: any offer from these SteamIDs can be auto-accepted when enabled.
+        private readonly HashSet<string> _trustedPartners = new HashSet<string>(StringComparer.Ordinal);
 
-        // simple cache for inventory pure snapshot (reduce calls)
+        // Runtime toggle (owner can switch it on/off with !trust)
+        private volatile bool _trustedAcceptEnabled = false;
+
         private PureSnapshot? _pureCache;
         private DateTime _pureCacheUtc;
 
@@ -119,12 +123,33 @@ namespace ArkRoxBot.Services
             else
             {
                 _sellTolRef = AcceptToleranceRef;
-            }
-
+            }           
             Console.WriteLine("[Trade] Flags → TRADING_ENABLED=" + _tradingEnabled +
                               ", DRY_RUN=" + _dryRun +
                               ", VERIFY_SELL_ASSETS=" + _verifySellAssets +
                               ", SELL_TOL_REF=" + _sellTolRef.ToString(System.Globalization.CultureInfo.InvariantCulture));
+
+            // ---------- Trusted partners + initial toggle ----------
+            string trustedRaw = Environment.GetEnvironmentVariable("TRUSTED_STEAMIDS") ?? string.Empty;
+            if (!string.IsNullOrWhiteSpace(trustedRaw))
+            {
+                string[] parts = trustedRaw.Split(new[] { ',', ';', ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                for (int i = 0; i < parts.Length; i++)
+                {
+                    string id = parts[i].Trim();
+                    if (id.Length >= 17) { _trustedPartners.Add(id); }
+                }
+            }
+
+            string trustedFlag = Environment.GetEnvironmentVariable("TRUSTED_ACCEPT_ENABLED") ?? string.Empty;
+            _trustedAcceptEnabled = string.Equals(trustedFlag, "true", StringComparison.OrdinalIgnoreCase);
+
+            if (_trustedPartners.Count > 0)
+            {
+                Console.WriteLine("[Trade] Trusted partners: " + string.Join(",", _trustedPartners));
+                Console.WriteLine("[Trade] Trusted auto-accept initially " + (_trustedAcceptEnabled ? "ENABLED" : "DISABLED") + ".");
+            }
+
         }
 
 
@@ -196,6 +221,45 @@ namespace ArkRoxBot.Services
             {
                 Console.WriteLine("[Stock] Snapshot failed: " + ex.Message);
             }
+        }
+
+        public void SetTrustedAcceptEnabled(bool enabled)
+        {
+            _trustedAcceptEnabled = enabled;
+            Console.WriteLine("[Trust] Trusted auto-accept " + (enabled ? "ENABLED" : "DISABLED") + ".");
+        }
+
+        public bool GetTrustedAcceptEnabled()
+        {
+            return _trustedAcceptEnabled;
+        }
+        private async Task<bool> TryTrustedAutoAcceptAsync(string offerId, string partnerSteamId64)
+        {
+            if (!_trustedAcceptEnabled)
+                return false;
+            if (!_trustedPartners.Contains(partnerSteamId64))
+                return false;
+
+            Console.WriteLine("[Trust] Offer " + offerId + " from " + partnerSteamId64 + " → auto-accept (trusted).");
+
+            if (!_tradingEnabled)
+            {
+                Console.WriteLine("[Trust] TRADING_ENABLED=false → would accept (trusted), skipping due to flag.");
+                return true; // handled
+            }
+
+            if (_dryRun)
+            {
+                Console.WriteLine("[Trust] DRY_RUN=true → would accept (trusted), no action.");
+                return true; // handled
+            }
+
+            bool ok = await AcceptOfferCommunityAsync(offerId, partnerSteamId64);
+            if (!ok)
+            {
+                Console.WriteLine("[Trust] Accept failed for trusted partner; check community cookies / Steam status.");
+            }
+            return true; // handled (don’t run normal policy)
         }
 
         private static async Task<string> SafeReadSnippetAsync(HttpResponseMessage resp)
@@ -505,6 +569,11 @@ namespace ArkRoxBot.Services
                 {
                     Console.WriteLine("[Trade] Offer " + offer.tradeofferid + " needs confirmation → skipping for now.");
                     continue;
+                }
+                bool handledByTrust = await TryTrustedAutoAcceptAsync(offer.tradeofferid, partner64);
+                if (handledByTrust)
+                {
+                    continue; // skip normal evaluation for this offer
                 }
 
                 // ---- Basic policy (tracked items, etc.)

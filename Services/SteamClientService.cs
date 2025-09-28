@@ -4,7 +4,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using SteamKit2;
 using ArkRoxBot.Interfaces;
-using SteamKit2.Internal;
 
 namespace ArkRoxBot.Services
 {
@@ -19,8 +18,17 @@ namespace ArkRoxBot.Services
         // For Dispose of the app
         private CancellationTokenSource? _pumpCts;
         private Task? _pumpTask;
-        private readonly System.Threading.ManualResetEventSlim _loggedOffSignal = new(false);
-        private readonly System.Threading.ManualResetEventSlim _disconnectedSignal = new(false);
+        private readonly System.Threading.ManualResetEventSlim _loggedOffSignal = new System.Threading.ManualResetEventSlim(false);
+        private readonly System.Threading.ManualResetEventSlim _disconnectedSignal = new System.Threading.ManualResetEventSlim(false);
+
+        // Presence keepalive
+        private System.Threading.Timer? _presenceTimer;
+        private readonly TimeSpan _presencePeriod = TimeSpan.FromMinutes(1);
+
+        private readonly TimeSpan _presenceBootstrapPeriod = TimeSpan.FromSeconds(45);
+        private const int PresenceBootstrapMaxTicks = 8; // ~6 minutes of nudging
+        private int _presenceBootstrapTicks = 0;
+
 
 
         // Bubble friend messages to bot logic
@@ -30,9 +38,6 @@ namespace ArkRoxBot.Services
         private string _username = string.Empty;
         private string _password = string.Empty;
         private string? _twoFactorCode = null;
-
-        // Callback pump
-        private bool _shouldPumpCallbacks = false;
 
         // Friend management
         private readonly Dictionary<string, DateTime> _lastMessageUtcBySteamId = new Dictionary<string, DateTime>();
@@ -56,6 +61,7 @@ namespace ArkRoxBot.Services
             _callbackManager.Subscribe<SteamFriends.FriendsListCallback>(OnFriendsListUpdated);
             _callbackManager.Subscribe<SteamFriends.PersonaStateCallback>(OnPersonaStateChanged);
             _callbackManager.Subscribe<SteamFriends.FriendAddedCallback>(OnFriendAdded);
+            _callbackManager.Subscribe<SteamUser.AccountInfoCallback>(OnAccountInfo);
 
         }
 
@@ -67,7 +73,9 @@ namespace ArkRoxBot.Services
 
             // If already pumping, do nothing.
             if (_pumpTask != null && !_pumpTask.IsCompleted)
+            {
                 return Task.CompletedTask;
+            }
 
             // Reset shutdown signals for this session
             _loggedOffSignal.Reset();
@@ -84,14 +92,10 @@ namespace ArkRoxBot.Services
             return Task.CompletedTask;
         }
 
-
-
         private async Task PumpAsync(CancellationToken token)
         {
-            // Run Steam callbacks until cancelled.
             while (!token.IsCancellationRequested)
             {
-                // Run any pending callbacks; 1s wait keeps CPU low but responsive.
                 _callbackManager.RunWaitCallbacks(TimeSpan.FromSeconds(1));
                 await Task.Yield();
             }
@@ -99,63 +103,108 @@ namespace ArkRoxBot.Services
 
         public void Disconnect()
         {
+            // Prefer StopAsync from callers; keep this as a hard fallback.
             try
-            {   
-                
-                _user.LogOff();
+            {
+                StopPresenceKeepalive();
+                try { _friends.SetPersonaState(EPersonaState.Offline); } catch { }
+                try { System.Threading.Thread.Sleep(500); } catch { }
+                try { _user.LogOff(); } catch { }
                 _client.Disconnect();
             }
             catch { }
+        }
+
+        private void NudgePersona()
+        {
+            try
+            {
+                // A small “toggle” often refreshes the community profile faster.
+                _friends.SetPersonaState(EPersonaState.Online);
+                try { Thread.Sleep(150); } catch { }
+                _friends.SetPersonaState(EPersonaState.LookingToTrade);
+            }
+            catch { }
+        }
+        private void OnAccountInfo(SteamUser.AccountInfoCallback callback)
+        {
+            // Called when our own persona/account info is ready; reassert state here.
+            Console.WriteLine("Steam: AccountInfo received → nudging persona.");
+            NudgePersona();
         }
 
 
         private void OnLoggedOff(SteamUser.LoggedOffCallback callback)
         {
             Console.WriteLine("Steam: Logged off → " + callback.Result);
+            StopPresenceKeepalive();
             _loggedOffSignal.Set();
-            _shouldPumpCallbacks = false;
         }
 
         private void OnDisconnected(SteamClient.DisconnectedCallback callback)
         {
             Console.WriteLine("Steam: Disconnected.");
+            StopPresenceKeepalive();
             _disconnectedSignal.Set();
-            _shouldPumpCallbacks = false;
         }
+
+        private async Task ForceOfflineFlushAsync(TimeSpan duration)
+        {
+            DateTime until = DateTime.UtcNow.Add(duration);
+
+            while (DateTime.UtcNow < until)
+            {
+                try { _friends.SetPersonaState(EPersonaState.Invisible); } catch { }
+                try { await Task.Delay(400); } catch { }
+
+                try { _friends.SetPersonaState(EPersonaState.Offline); } catch { }
+                try { await Task.Delay(600); } catch { }
+            }
+        }
+
+
 
 
         public async Task StopAsync(TimeSpan? timeout = null)
         {
-            TimeSpan wait = timeout ?? TimeSpan.FromSeconds(5);
+            TimeSpan wait = timeout ?? TimeSpan.FromSeconds(20);
             Console.WriteLine("Steam: Shutting down…");
 
+            // Stop keepalive first so nothing flips us back online
+            StopPresenceKeepalive();
+
+            // 1) Repeatedly assert "Offline" while the callback pump is still running
+            try { await ForceOfflineFlushAsync(TimeSpan.FromSeconds(12)); } catch { }
+
+            // 2) Log off and wait for LoggedOff
             try
             {
-                try { _friends.SetPersonaState(EPersonaState.Offline); } catch { }
-                try { Thread.Sleep(750); } catch { }                  // give presence a moment to propagate
                 try { _user.LogOff(); } catch { }
-                _loggedOffSignal.Wait(wait);
+                bool gotLoggedOff = _loggedOffSignal.Wait(wait);
+                Console.WriteLine("Steam: LoggedOff wait → " + (gotLoggedOff ? "OK" : "timeout"));
             }
             catch (Exception ex)
             {
                 Console.WriteLine("[SteamClientService] Stop: logoff wait error: " + ex.Message);
             }
 
+            // 3) Disconnect and wait
             try
             {
                 _client.Disconnect();
-                _disconnectedSignal.Wait(wait);
+                bool gotDisconnected = _disconnectedSignal.Wait(wait);
+                Console.WriteLine("Steam: Disconnect wait → " + (gotDisconnected ? "OK" : "timeout"));
             }
             catch (Exception ex)
             {
                 Console.WriteLine("[SteamClientService] Stop: disconnect error: " + ex.Message);
             }
 
+            // 4) Cancel the callback pump last
             try
             {
                 _pumpCts?.Cancel();
-                if (_pumpTask != null)
-                    await Task.WhenAny(_pumpTask, Task.Delay(wait));
+                if (_pumpTask != null) { await Task.WhenAny(_pumpTask, Task.Delay(wait)); }
             }
             catch (Exception ex)
             {
@@ -170,10 +219,60 @@ namespace ArkRoxBot.Services
             Console.WriteLine("[SteamClientService] Stopped gracefully.");
         }
 
+
+
+
+        // -------------------------
+        // Presence keepalive
+        // -------------------------
+        private void StartPresenceKeepalive()
+        {
+            StopPresenceKeepalive();
+
+            _presenceBootstrapTicks = 0;
+
+            // Bootstrap phase: hit every 45s to push community profile to Online quickly.
+            _presenceTimer = new System.Threading.Timer(_ =>
+            {
+                try
+                {
+                    NudgePersona();
+
+                    int t = System.Threading.Interlocked.Increment(ref _presenceBootstrapTicks);
+                    if (t >= PresenceBootstrapMaxTicks && _presenceTimer != null)
+                    {
+                        // Switch to steady state (every 4 minutes)
+                        _presenceTimer.Change(_presencePeriod, _presencePeriod);
+                        Console.WriteLine("[Steam] Presence keepalive → steady (" + _presencePeriod.TotalMinutes.ToString() + "m).");
+                    }
+                }
+                catch { }
+            }, null, TimeSpan.Zero, _presenceBootstrapPeriod);
+
+            Console.WriteLine("[Steam] Presence keepalive started (bootstrap " +
+                              _presenceBootstrapPeriod.TotalSeconds.ToString() + "s × " +
+                              PresenceBootstrapMaxTicks.ToString() + " → steady " +
+                              _presencePeriod.TotalMinutes.ToString() + "m).");
+        }
+
+        private void StopPresenceKeepalive()
+        {
+            try
+            {
+                if (_presenceTimer != null)
+                {
+                    _presenceTimer.Change(System.Threading.Timeout.Infinite, System.Threading.Timeout.Infinite);
+                    _presenceTimer.Dispose();
+                    _presenceTimer = null;
+                }
+                Console.WriteLine("[Steam] Presence keepalive stopped.");
+            }
+            catch { }
+        }
+
         // -------------------------
         // Login (password + 2FA only)
         // -------------------------
-
         private void OnConnected(SteamClient.ConnectedCallback callback)
         {
             Console.WriteLine("Steam: Connected. Logging in with password + 2FA…");
@@ -181,26 +280,56 @@ namespace ArkRoxBot.Services
             SteamUser.LogOnDetails details = new SteamUser.LogOnDetails
             {
                 Username = _username,
-                Password = _password,          // always send password
-                TwoFactorCode = _twoFactorCode // provide Steam Guard code each run
-                // No SentryFileHash
-                // No LoginKey
+                Password = _password,
+                TwoFactorCode = _twoFactorCode
             };
 
             _user.LogOn(details);
         }
-        // Fires when Steam updates persona/relationship for a single user.
-        // If someone sent us a friend request, their relationship becomes RequestRecipient.
+
+        private void OnLoggedOn(SteamUser.LoggedOnCallback callback)
+        {
+            if (callback.Result == EResult.OK)
+            {
+                Console.WriteLine("Steam: Logged on successfully.");
+                try
+                {
+                    _friends.SetPersonaState(EPersonaState.Online);
+                    _friends.SetPersonaState(EPersonaState.LookingToTrade); // nudge community profile
+                    StartPresenceKeepalive();
+                }
+                catch { }
+
+                StartPresenceKeepalive();
+                AcceptAnyPendingInvites();
+                return;
+            }
+
+            if (callback.Result == EResult.AccountLoginDeniedNeedTwoFactor)
+                Console.WriteLine("Steam: 2FA required (AccountLoginDeniedNeedTwoFactor). Provide a fresh code and reconnect.");
+            else if (callback.Result == EResult.AccountLogonDenied)
+                Console.WriteLine("Steam: Email code required (AccountLogonDenied). Provide the code and reconnect.");
+            else
+                Console.WriteLine("Steam: Login failed → " + callback.Result + " (extended: " + callback.ExtendedResult + ")");
+        }
+
+        // -----------------
+        // Friends & chatting
+        // -----------------
+        public void SendMessage(string steamId64, string text)
+        {
+            SteamID steamId = new SteamID(Convert.ToUInt64(steamId64));
+            string safeText = text ?? string.Empty;
+            _friends.SendChatMessage(steamId, EChatEntryType.ChatMsg, safeText);
+        }
+
         private void OnPersonaStateChanged(SteamFriends.PersonaStateCallback callback)
         {
             SteamID who = callback.FriendID;
             EFriendRelationship rel = _friends.GetFriendRelationship(who);
-
             Console.WriteLine("PersonaState: " + who.ConvertToUInt64() + " rel=" + rel);
-
         }
 
-        // Fires after Steam accepts our AddFriend (or fails).
         private void OnFriendAdded(SteamFriends.FriendAddedCallback callback)
         {
             string sid = callback.SteamID.ConvertToUInt64().ToString();
@@ -209,13 +338,14 @@ namespace ArkRoxBot.Services
             {
                 Console.WriteLine("Friend added: " + sid + " → sending welcome.");
                 SendMessage(sid, "Hey! I’m a trading bot. Type !help for commands.");
-                _lastMessageUtcBySteamId[sid] = DateTime.UtcNow; // optional: mark activity
+                _lastMessageUtcBySteamId[sid] = DateTime.UtcNow;
             }
             else
             {
                 Console.WriteLine("AddFriend failed for " + sid + " → " + callback.Result);
             }
         }
+
         private void AcceptAnyPendingInvites()
         {
             int total = _friends.GetFriendCount();
@@ -226,59 +356,8 @@ namespace ArkRoxBot.Services
                 {
                     Console.WriteLine("Accepting pending invite (startup) from " + id.ConvertToUInt64());
                     _friends.AddFriend(id);
-                }
-            }
-        }
-
-
-        private void OnLoggedOn(SteamUser.LoggedOnCallback callback)
-        {
-            if (callback.Result == EResult.OK)
-            {
-                Console.WriteLine("Steam: Logged on successfully.");
-                _friends.SetPersonaState(EPersonaState.Online);
-                AcceptAnyPendingInvites();   // ← add this
-                return;
-            }
-
-            if (callback.Result == EResult.AccountLoginDeniedNeedTwoFactor)
-                Console.WriteLine("Steam: 2FA required (AccountLoginDeniedNeedTwoFactor). Provide a fresh code and reconnect.");
-            else if (callback.Result == EResult.AccountLogonDenied)
-                Console.WriteLine("Steam: Email code required (AccountLogonDenied). Provide the code and reconnect.");
-            else
-                Console.WriteLine("Steam: Login failed → " + callback.Result + " (extended: " + callback.ExtendedResult + ")");
-
-            _shouldPumpCallbacks = false;
-        }
-
- 
-
-        // -----------------
-        // Friends & chatting
-        // -----------------
-
-        public void SendMessage(string steamId64, string text)
-        {
-            SteamID steamId = new SteamID(Convert.ToUInt64(steamId64));
-            string safeText = text ?? string.Empty;
-            _friends.SendChatMessage(steamId, EChatEntryType.ChatMsg, safeText);
-        }
-
-        private void OnFriendsListUpdated(SteamFriends.FriendsListCallback callback)
-        {
-            foreach (SteamFriends.FriendsListCallback.Friend friend in callback.FriendList)
-            {
-                if (friend.Relationship == EFriendRelationship.RequestRecipient)
-                {
-                    SteamID id = friend.SteamID;
-                    Console.WriteLine("Friend request from " + id.ConvertToUInt64() + " → accepting.");
-                    _friends.AddFriend(id);
-
-                    // let Steam apply the relationship
-                    Thread.Sleep(500);
-
-                    SendMessage(id.ConvertToUInt64().ToString(),
-                        "Hey! I’m a trading bot. Type !help for commands.");
+                    try { Thread.Sleep(500); } catch { }
+                    SendMessage(id.ConvertToUInt64().ToString(), "Hey! I’m a trading bot. Type !help for commands.");
                 }
             }
 
@@ -303,6 +382,23 @@ namespace ArkRoxBot.Services
             {
                 handler.Invoke(steamId64, message);
             }
+        }
+
+        private void OnFriendsListUpdated(SteamFriends.FriendsListCallback callback)
+        {
+            foreach (SteamFriends.FriendsListCallback.Friend friend in callback.FriendList)
+            {
+                if (friend.Relationship == EFriendRelationship.RequestRecipient)
+                {
+                    SteamID id = friend.SteamID;
+                    Console.WriteLine("Friend request from " + id.ConvertToUInt64() + " → accepting.");
+                    _friends.AddFriend(id);
+                    try { Thread.Sleep(500); } catch { }
+                    SendMessage(id.ConvertToUInt64().ToString(), "Hey! I’m a trading bot. Type !help for commands.");
+                }
+            }
+
+            PruneFriendsIfNeeded();
         }
 
         private void PruneFriendsIfNeeded()
@@ -369,6 +465,5 @@ namespace ArkRoxBot.Services
                 friendCount--;
             }
         }
-
     }
 }

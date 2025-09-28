@@ -3,6 +3,7 @@ using ArkRoxBot.Models;
 using ArkRoxBot.Models.Config;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading.Tasks;
 
@@ -18,6 +19,9 @@ namespace ArkRoxBot.Services
         private readonly CommandService _commandService;
         private readonly ItemConfigLoader _configLoader;
         private readonly BackpackListingService _listingService;
+        private readonly TradeService _trade;
+        private readonly string _ownerSteamId64;
+
 
         public BotService(
             ISteamClientService steam,
@@ -27,7 +31,8 @@ namespace ArkRoxBot.Services
             PriceStore priceStore,
             CommandService commandService,
             ItemConfigLoader configLoader,
-            BackpackListingService listingService)
+            BackpackListingService listingService,
+            TradeService trade,)
         {
             _steam = steam;
             _scraper = scraper;
@@ -37,6 +42,10 @@ namespace ArkRoxBot.Services
             _commandService = commandService;
             _configLoader = configLoader;
             _listingService = listingService;
+            _trade = trade;
+
+            _ownerSteamId64 = (Environment.GetEnvironmentVariable("OWNER_STEAMID") ?? "765611988085806375").Trim();
+
 
         }
 
@@ -50,7 +59,52 @@ namespace ArkRoxBot.Services
             {
                 try
                 {
-                    string reply = _commandService.HandleCommand(text);
+                    string msg = (text ?? string.Empty).Trim();
+
+                    // --- Owner-only toggle for trusted auto-accept ----------------------
+                    // Owner SteamID can come from env var or your _ownerSteamId64 field.
+                    string configuredOwner = (Environment.GetEnvironmentVariable("OWNER_STEAMID") ?? _ownerSteamId64 ?? string.Empty).Trim();
+
+                    if (msg.StartsWith("!trust", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (string.IsNullOrEmpty(configuredOwner))
+                        {
+                            _steam.SendMessage(steamId, "Owner not configured. Set OWNER_STEAMID environment variable.");
+                            return;
+                        }
+
+                        if (!string.Equals(steamId, configuredOwner, StringComparison.Ordinal))
+                        {
+                            _steam.SendMessage(steamId, "This command is owner-only.");
+                            return;
+                        }
+
+                        if (msg.Equals("!trust status", StringComparison.OrdinalIgnoreCase))
+                        {
+                            bool on = _trade.GetTrustedAcceptEnabled();
+                            _steam.SendMessage(steamId, "Trusted auto-accept is " + (on ? "ON" : "OFF") + ".");
+                            return;
+                        }
+                        if (msg.Equals("!trust on", StringComparison.OrdinalIgnoreCase))
+                        {
+                            _trade.SetTrustedAcceptEnabled(true);
+                            _steam.SendMessage(steamId, "Trusted auto-accept: ON");
+                            return;
+                        }
+                        if (msg.Equals("!trust off", StringComparison.OrdinalIgnoreCase))
+                        {
+                            _trade.SetTrustedAcceptEnabled(false);
+                            _steam.SendMessage(steamId, "Trusted auto-accept: OFF");
+                            return;
+                        }
+
+                        _steam.SendMessage(steamId, "Usage: !trust on | !trust off | !trust status");
+                        return;
+                    }
+                    // --------------------------------------------------------------------
+
+                    // Your existing command handling
+                    string reply = _commandService.HandleCommand(msg);
                     if (!string.IsNullOrWhiteSpace(reply))
                         _steam.SendMessage(steamId, reply);
                 }
@@ -63,6 +117,7 @@ namespace ArkRoxBot.Services
 
             _chatWired = true;
         }
+
 
         // Fallback SELL: if we couldn’t compute one this run, use previous stored SELL (if any)
         private void FillMissingSellFromPrevious(string itemName, PriceResult result)
