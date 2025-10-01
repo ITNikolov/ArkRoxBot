@@ -1,8 +1,7 @@
-﻿using System;
-using System.Collections.Generic;
+﻿using System.Globalization;
+using ArkRoxBot.Interfaces;
 using ArkRoxBot.Models;
-using ArkRoxBot.Services;
-using System.Globalization;
+using Microsoft.Extensions.Configuration;
 
 namespace ArkRoxBot.Services
 {
@@ -10,69 +9,111 @@ namespace ArkRoxBot.Services
     {
         private readonly PriceStore _priceStore;
         private readonly InventoryService _inventory;
+        private readonly ITradeService _trade;
+        private readonly string _manualTradeUrl;
 
-        public CommandService(PriceStore priceStore, InventoryService inventory)
+
+
+
+        public CommandService(PriceStore priceStore, InventoryService inventory, ITradeService trade,IConfiguration cfg)
         {
             _priceStore = priceStore;
             _inventory = inventory;
-        }
+            _trade = trade;
 
-        public string HandleCommand(string message)
-        {
-            if (string.IsNullOrWhiteSpace(message))
-                return string.Empty;
-
-            string text = message.Trim();
-
-            if (text.Equals("!help", StringComparison.OrdinalIgnoreCase) ||
-                text.Equals("!how2trade", StringComparison.OrdinalIgnoreCase))
+            string tradeUrl = cfg["Steam:TradeUrl"] ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(tradeUrl))
             {
-                return "Available Commands: !price <item>, !buy <item>, !sell <item>, !owner, !help, !status";
+                string env = Environment.GetEnvironmentVariable("BOT_TRADE_URL") ?? string.Empty;
+                if (!string.IsNullOrWhiteSpace(env)) tradeUrl = env;
+            }
+            if (string.IsNullOrWhiteSpace(tradeUrl))
+            {
+                string botId = cfg["Steam:BotId"] ?? string.Empty;
+                if (!string.IsNullOrWhiteSpace(botId))
+                    tradeUrl = "https://steamcommunity.com/profiles/" + botId + "/tradeoffers/";
             }
 
-            if (text.StartsWith("!price ", StringComparison.OrdinalIgnoreCase))
-                return HandlePrice(text.Substring(7).Trim());
+            _manualTradeUrl = tradeUrl;
+        }
 
-            if (text.StartsWith("!buy ", StringComparison.OrdinalIgnoreCase))
-                return HandleUserBuysFromUs(text.Substring(5).Trim());   // uses SELL
+        public async Task<string> HandleCommandAsync(string message, string partnerSteamId64)
+        {
+            if (string.IsNullOrWhiteSpace(message)) return string.Empty;
+            string text = message.Trim();
 
-            if (text.StartsWith("!sell ", StringComparison.OrdinalIgnoreCase))
-                return HandleUserSellsToUs(text.Substring(6).Trim());     // uses BUY
-
-            if (text.Equals("!owner", StringComparison.OrdinalIgnoreCase))
-                return "Owner: https://steamcommunity.com/id/yourprofile/"; // adjust
+            if (text.Equals("!help", StringComparison.OrdinalIgnoreCase))
+                return "Commands: !price <item>, !buy <item>, !sell <item>, !status";
 
             if (text.Equals("!status", StringComparison.OrdinalIgnoreCase))
                 return HandleStatus();
 
+            if (text.StartsWith("!price ", StringComparison.OrdinalIgnoreCase))
+            {
+                string item = text.Substring(7).Trim();
+                PriceResult price;
+                if (!_priceStore.TryGetPrice(item, out price))
+                    return "No price for '" + item + "' yet.";
+
+                string buy = price.MostCommonBuyPrice > 0m ? price.MostCommonBuyPrice.ToString("0.00") + " ref" : "—";
+                string sell = price.MostCommonSellPrice > 0m ? price.MostCommonSellPrice.ToString("0.00") + " ref" : "—";
+                return item + " — BUY: " + buy + " | SELL: " + sell;
+            }
+
+            // User wants to BUY from us → use SELL price
+            if (text.StartsWith("!buy ", StringComparison.OrdinalIgnoreCase))
+            {
+                string item = text.Substring(5).Trim();
+                PriceResult price;
+                if (!_priceStore.TryGetPrice(item, out price) || price.MostCommonSellPrice <= 0m)
+                    return "I’m not selling '" + item + "' right now. " + ManualTradeHint();
+
+                (bool Ok, string? OfferId, string Reason) result =
+                    await _trade.CreateSellOfferAsync(partnerSteamId64, item, price.MostCommonSellPrice);
+
+                if (result.Ok)
+                    return "Sent you an offer to SELL '" + item + "' for " +
+                           price.MostCommonSellPrice.ToString("0.00") + " ref. (id: " +
+                           (result.OfferId ?? "unknown") + ")";
+
+                return "I couldn’t create the offer automatically (" + result.Reason + "). " + ManualTradeHint();
+            }
+
+            // User wants to SELL to us → use BUY price
+            if (text.StartsWith("!sell ", StringComparison.OrdinalIgnoreCase))
+            {
+                string item = text.Substring(6).Trim();
+                PriceResult price;
+                if (!_priceStore.TryGetPrice(item, out price) || price.MostCommonBuyPrice <= 0m)
+                    return "I’m not buying '" + item + "' right now. " + ManualTradeHint();
+
+                (bool Ok, string? OfferId, string Reason) result =
+                    await _trade.CreateBuyOfferAsync(partnerSteamId64, item, price.MostCommonBuyPrice);
+
+                if (result.Ok)
+                    return "Sent you an offer to BUY '" + item + "' for " +
+                           price.MostCommonBuyPrice.ToString("0.00") + " ref. (id: " +
+                           (result.OfferId ?? "unknown") + ")";
+
+                return "I couldn’t create the offer automatically (" + result.Reason + "). " + ManualTradeHint();
+            }
+
             return string.Empty;
         }
+
 
         private string HandleStatus()
         {
             try
             {
-                // Inventory snapshot (full-frame TF2: keys + metal)
-                InventorySnapshot snap = _inventory.GetSnapshotAsync().GetAwaiter().GetResult();
+                var snap = _inventory.GetSnapshotAsync().GetAwaiter().GetResult();
+                var all = _priceStore.GetAllPrices();
+                var last = _priceStore.LastUpdatedUtc == DateTime.MinValue
+                    ? "n/a"
+                    : _priceStore.LastUpdatedUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
 
-                // Priced items currently in the store
-                IReadOnlyDictionary<string, PriceResult> all = _priceStore.GetAllPrices();
-                int pricedCount = all.Count;
-
-                // Last price refresh timestamp
-                string last =
-                    _priceStore.LastUpdatedUtc == DateTime.MinValue
-                        ? "n/a"
-                        : _priceStore.LastUpdatedUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
-
-                // Compact, readable summary
-                return
-                    "Stock — Keys: " + snap.Keys.ToString(CultureInfo.InvariantCulture) +
-                    " | Refined: " + snap.Refined.ToString(CultureInfo.InvariantCulture) +
-                    " (Recl: " + snap.Reclaimed.ToString(CultureInfo.InvariantCulture) +
-                    ", Scrap: " + snap.Scrap.ToString(CultureInfo.InvariantCulture) + ")" +
-                    " | Priced items: " + pricedCount.ToString(CultureInfo.InvariantCulture) +
-                    " | Last price refresh: " + last;
+                return $"Stock — Keys: {snap.Keys} | Refined: {snap.Refined} (Recl: {snap.Reclaimed}, Scrap: {snap.Scrap})"
+                     + $" | Priced items: {all.Count} | Last price refresh: {last}";
             }
             catch (Exception ex)
             {
@@ -81,56 +122,11 @@ namespace ArkRoxBot.Services
             }
         }
 
-        private string HandlePrice(string item)
+        private string ManualTradeHint()
         {
-            PriceResult? p;
-            if (!TryGetPriceInsensitive(item, out p) || p == null)
-                return "I don’t have a price for '" + item + "' right now.";
-
-            string buy = p.MostCommonBuyPrice > 0 ? p.MostCommonBuyPrice.ToString("0.00") + " ref" : "—";
-            string sell = p.MostCommonSellPrice > 0 ? p.MostCommonSellPrice.ToString("0.00") + " ref" : "—";
-            return item + " — BUY: " + buy + " | SELL: " + sell;
-        }
-
-        // User says "!buy <item>" → user wants to buy from us → show SELL price.
-        private string HandleUserBuysFromUs(string item)
-        {
-            PriceResult? p;
-            if (!TryGetPriceInsensitive(item, out p) || p == null || p.MostCommonSellPrice <= 0)
-                return "I’m not selling '" + item + "' right now.";
-
-            string amt = p.MostCommonSellPrice.ToString("0.00");
-            return "To buy '" + item + "', I sell it for " + amt + " ref. "
-                 + "Send a trade offer and I’ll handle it soon.";
-            // next step: auto-create the offer here via TradeService
-        }
-
-        // User says "!sell <item>" → user wants to sell to us → show BUY price.
-        private string HandleUserSellsToUs(string item)
-        {
-            PriceResult? p;
-            if (!TryGetPriceInsensitive(item, out p) || p == null || p.MostCommonBuyPrice <= 0)
-                return "I’m not buying '" + item + "' right now.";
-
-            string amt = p.MostCommonBuyPrice.ToString("0.00");
-            return "To sell '" + item + "', I pay " + amt + " ref if the item matches. "
-                 + "Send a trade offer and I’ll handle it soon.";
-            // next step: auto-accept based on TradeService checks
-        }
-
-        private bool TryGetPriceInsensitive(string name, out PriceResult? result)
-        {
-            IReadOnlyDictionary<string, PriceResult> all = _priceStore.GetAllPrices();
-            foreach (KeyValuePair<string, PriceResult> kv in all)
-            {
-                if (string.Equals(kv.Key, name, StringComparison.OrdinalIgnoreCase))
-                {
-                    result = kv.Value;
-                    return true;
-                }
-            }
-            result = null;
-            return false;
+            return string.IsNullOrEmpty(_manualTradeUrl)
+                ? "You can still send me a trade offer manually from my profile."
+                : $"You can still send me a trade offer here: {_manualTradeUrl}";
         }
     }
 }

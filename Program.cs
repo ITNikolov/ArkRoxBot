@@ -1,6 +1,9 @@
-﻿using ArkRoxBot.Interfaces;
+﻿using System;
+using System.Threading.Tasks;
+using ArkRoxBot.Interfaces;
 using ArkRoxBot.Models;
 using ArkRoxBot.Services;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 
@@ -9,52 +12,67 @@ internal static class Program
     public static async Task Main(string[] args)
     {
         using IHost host = Host.CreateDefaultBuilder(args)
-            .ConfigureServices(services =>
+            // If you keep appsettings.json in Data/, load it here.
+            .ConfigureAppConfiguration((context, config) =>
             {
-                services.AddSingleton<CommandService>();
+                config.AddJsonFile("Data/appsettings.json", optional: true, reloadOnChange: true);
+            })
+            .ConfigureServices((context, services) =>
+            {
+                // IConfiguration is already registered by the host; the next line is optional.
+                services.AddSingleton<IConfiguration>(context.Configuration);
+
+                // Core singletons
+                services.AddSingleton<PriceStore>();
+                services.AddSingleton<ItemConfigLoader>(_ => new ItemConfigLoader("Data/items.json"));
+
+                services.AddSingleton<InventoryService>(_ =>
+                    new InventoryService(context.Configuration["Steam:BotId"] ?? "YOUR_BOT_STEAMID64"));
+
                 services.AddSingleton<IKeyPriceTracker, KeyPriceTracker>();
                 services.AddSingleton<IPriceParser, PriceParser>();
                 services.AddSingleton<PriceCalculator>();
                 services.AddSingleton<PlaywrightScraper>();
-                services.AddSingleton<PriceStore>();
                 services.AddSingleton<BackpackListingService>();
-                services.AddSingleton<ItemConfigLoader>(_ => new ItemConfigLoader("Data/items.json"));
-
-                services.AddSingleton<ISteamClientService, SteamClientService>();
 
                 services.AddSingleton<OfferEvaluator>(sp =>
                 {
-                    var store = sp.GetRequiredService<PriceStore>();
+                    PriceStore store = sp.GetRequiredService<PriceStore>();
                     const decimal minProfitRef = 0.11m;
                     return new OfferEvaluator(store, minProfitRef);
                 });
 
+                // Register concrete TradeService (since your CommandService and BotApp depend on TradeService)
                 services.AddSingleton<TradeService>(sp =>
                 {
-                    var store = sp.GetRequiredService<PriceStore>();
-                    var items = sp.GetRequiredService<ItemConfigLoader>();
-                    var evaluator = sp.GetRequiredService<OfferEvaluator>();
+                    IConfiguration cfg = sp.GetRequiredService<IConfiguration>();
+                    PriceStore store = sp.GetRequiredService<PriceStore>();
+                    ItemConfigLoader items = sp.GetRequiredService<ItemConfigLoader>();
+                    OfferEvaluator evaluator = sp.GetRequiredService<OfferEvaluator>();
 
-                    string apiKey = "A6FEBC05BEAD8EAC88F2439A5E8B8741";
-                    string botId = "76561199466477276";
+                    string apiKey = cfg["Steam:ApiKey"] ?? "YOUR_API_KEY";
+                    string botId = cfg["Steam:BotId"] ?? "YOUR_BOT_STEAMID64";
 
                     return new TradeService(store, items, apiKey, botId, evaluator);
                 });
 
-                services.AddSingleton<InventoryService>(sp =>
-                {
-                    var botId = "76561199466477276";
-                    return new InventoryService(botId);
-                });
+                // CommandService needs TradeService and IConfiguration
+                services.AddSingleton<CommandService>(sp =>
+                    new CommandService(
+                        sp.GetRequiredService<PriceStore>(),
+                        sp.GetRequiredService<InventoryService>(),
+                        sp.GetRequiredService<TradeService>(),
+                        sp.GetRequiredService<IConfiguration>()));
 
-                services.AddSingleton<BotService>();       // ok even if no Stop()
-
+                services.AddSingleton<ISteamClientService, SteamClientService>();
+                services.AddSingleton<BotService>();
                 services.AddHostedService<BotApp>();
             })
             .Build();
 
-        var sp = host.Services;
-        var lifetime = sp.GetRequiredService<IHostApplicationLifetime>();
+        // Graceful shutdown hooks
+        IServiceProvider sp = host.Services;
+        IHostApplicationLifetime lifetime = sp.GetRequiredService<IHostApplicationLifetime>();
 
         lifetime.ApplicationStopping.Register(() =>
         {
@@ -62,7 +80,7 @@ internal static class Program
             try
             {
                 sp.GetRequiredService<ISteamClientService>()
-                    .StopAsync(TimeSpan.FromSeconds(20)).GetAwaiter().GetResult();
+                  .StopAsync(TimeSpan.FromSeconds(20)).GetAwaiter().GetResult();
             }
             catch { }
         });
@@ -72,11 +90,10 @@ internal static class Program
             try
             {
                 sp.GetRequiredService<ISteamClientService>()
-                    .StopAsync(TimeSpan.FromSeconds(20)).GetAwaiter().GetResult();
+                  .StopAsync(TimeSpan.FromSeconds(20)).GetAwaiter().GetResult();
             }
             catch { }
         };
-
 
         await host.RunAsync();
     }

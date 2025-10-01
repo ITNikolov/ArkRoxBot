@@ -27,9 +27,9 @@ namespace ArkRoxBot.Services
         /// Full-frame TF2 inventory snapshot via the community inventory endpoint.
         /// Keeps the whole inventory; counts keys & metal and returns a timestamp.
         /// </summary>
-        public async Task<InventorySnapshot> GetSnapshotAsync()
+        public async Task<InvSnapshot> GetSnapshotAsync()
         {
-            InventorySnapshot snapshot = new InventorySnapshot();
+            InvSnapshot snapshot = new InvSnapshot();
 
             if (string.IsNullOrWhiteSpace(_botSteamId64))
                 return snapshot;
@@ -45,21 +45,21 @@ namespace ArkRoxBot.Services
             }
 
             string json = await resp.Content.ReadAsStringAsync();
-            InventoryResponse? parsed = JsonConvert.DeserializeObject<InventoryResponse>(json);
+            InvResponse? parsed = JsonConvert.DeserializeObject<InvResponse>(json);
             if (parsed == null || parsed.assets == null || parsed.descriptions == null)
             {
                 Console.WriteLine("[Inventory] Empty or malformed response.");
                 return snapshot;
             }
 
-            Dictionary<string, InvDescription> descIndex = BuildDescriptionIndex(parsed.descriptions);
+            Dictionary<string, InvDesc> descIndex = BuildDescriptionIndex(parsed.descriptions);
 
             foreach (InvAsset a in parsed.assets)
             {
                 if (a.appid != 440) continue; // TF2 only
 
                 string key = a.classid + "_" + a.instanceid;
-                string name = descIndex.TryGetValue(key, out InvDescription d) && !string.IsNullOrEmpty(d.name)
+                string name = descIndex.TryGetValue(key, out InvDesc d) && !string.IsNullOrEmpty(d.name)
                     ? d.name
                     : key;
 
@@ -93,12 +93,12 @@ namespace ArkRoxBot.Services
             return snapshot;
         }
 
-        private static Dictionary<string, InvDescription> BuildDescriptionIndex(List<InvDescription> descriptions)
+        private static Dictionary<string, InvDesc> BuildDescriptionIndex(List<InvDesc> descriptions)
         {
-            Dictionary<string, InvDescription> dict = new Dictionary<string, InvDescription>(StringComparer.Ordinal);
+            Dictionary<string, InvDesc> dict = new Dictionary<string, InvDesc>(StringComparer.Ordinal);
             if (descriptions == null) return dict;
 
-            foreach (InvDescription d in descriptions)
+            foreach (InvDesc d in descriptions)
             {
                 string key = d.classid + "_" + d.instanceid;
                 if (!dict.ContainsKey(key))
@@ -110,10 +110,10 @@ namespace ArkRoxBot.Services
 
     // ===== Models for community inventory =====
 
-    internal sealed class InventoryResponse
+    internal sealed class InvResponse
     {
         public List<InvAsset> assets { get; set; } = new List<InvAsset>();
-        public List<InvDescription> descriptions { get; set; } = new List<InvDescription>();
+        public List<InvDesc> descriptions { get; set; } = new List<InvDesc>();
         public bool more { get; set; }
         public string? last_assetid { get; set; }
     }
@@ -128,14 +128,14 @@ namespace ArkRoxBot.Services
         public string amount { get; set; } = "1";
     }
 
-    internal sealed class InvDescription
+    internal sealed class InvDesc
     {
         public string classid { get; set; } = string.Empty;
         public string instanceid { get; set; } = string.Empty;
         public string name { get; set; } = string.Empty;
     }
 
-    public sealed class InventorySnapshot
+    public sealed class InvSnapshot
     {
         public int Keys { get; set; }
         public int Refined { get; set; }

@@ -32,7 +32,7 @@ namespace ArkRoxBot.Services
             CommandService commandService,
             ItemConfigLoader configLoader,
             BackpackListingService listingService,
-            TradeService trade,)
+            TradeService trade)
         {
             _steam = steam;
             _scraper = scraper;
@@ -55,7 +55,7 @@ namespace ArkRoxBot.Services
         {
             if (_chatWired) return;
 
-            _steam.OnFriendMessage += (string steamId, string text) =>
+            _steam.OnFriendMessage += async (string steamId, string text) =>
             {
                 try
                 {
@@ -104,7 +104,7 @@ namespace ArkRoxBot.Services
                     // --------------------------------------------------------------------
 
                     // Your existing command handling
-                    string reply = _commandService.HandleCommand(msg);
+                    string reply = await _commandService.HandleCommandAsync(msg, steamId);
                     if (!string.IsNullOrWhiteSpace(reply))
                         _steam.SendMessage(steamId, reply);
                 }
